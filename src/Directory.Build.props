@@ -1,0 +1,7 @@
+<Project>
+  <!-- Inherit repo-root conventions, then opt src/ projects into packing. -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+</Project>

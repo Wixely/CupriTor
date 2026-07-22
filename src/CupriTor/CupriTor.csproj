@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>CupriTor</RootNamespace>
+    <AssemblyName>CupriTor</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="CupriTor.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Managed crypto (SHA3, TLS, primitives). Ed25519 group math / key blinding via CupriCurve. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+    <ProjectReference Include="..\..\..\CupriCurve\src\CupriCurve\CupriCurve.csproj" />
+  </ItemGroup>
+
+</Project>

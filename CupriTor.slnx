@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CupriTor/CupriTor.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/CupriTor.Tests/CupriTor.Tests.csproj" />
+  </Folder>
+  <Project Path="../CupriCurve/src/CupriCurve/CupriCurve.csproj" />
+</Solution>
