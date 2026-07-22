@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.vs/
+artifacts/
+[Tt]est[Rr]esults/
+
+# Design / planning notes — kept local, not part of the library
+plan/

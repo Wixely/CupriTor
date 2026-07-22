@@ -1,0 +1,6 @@
+# Normalize line endings to LF in the repository; check out native on each OS.
+* text=auto
+*.cs text
+*.csproj text
+*.props text
+*.slnx text
