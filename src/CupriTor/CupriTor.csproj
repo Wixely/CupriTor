@@ -12,7 +12,7 @@
   <ItemGroup>
     <!-- Managed crypto (SHA3, TLS, primitives). Ed25519 group math / key blinding via CupriCurve. -->
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
-    <ProjectReference Include="..\..\..\CupriCurve\src\CupriCurve\CupriCurve.csproj" />
+    <PackageReference Include="CupriCurve" Version="0.1.0" />
   </ItemGroup>
 
 </Project>

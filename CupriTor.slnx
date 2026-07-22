@@ -5,5 +5,4 @@
   <Folder Name="/test/">
     <Project Path="test/CupriTor.Tests/CupriTor.Tests.csproj" />
   </Folder>
-  <Project Path="../CupriCurve/src/CupriCurve/CupriCurve.csproj" />
 </Solution>
