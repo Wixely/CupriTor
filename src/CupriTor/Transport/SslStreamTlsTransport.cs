@@ -21,16 +21,12 @@ public sealed class SslStreamTlsTransport : ITlsTransport
             await tcp.ConnectAsync(host, port, ct).ConfigureAwait(false);
 
             byte[]? peerCertDer = null;
-            var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false,
-                userCertificateValidationCallback: (_, cert, _, _) =>
-                {
-                    peerCertDer = cert?.GetRawCertData();
-                    return true; // Tor does not use the web PKI; the relay is authenticated in-band.
-                });
+            var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false);
 
             var options = new SslClientAuthenticationOptions
             {
                 TargetHost = host,
+                // Tor does not use the web PKI; the relay is authenticated in-band via the CERTS chain.
                 RemoteCertificateValidationCallback = (_, cert, _, _) =>
                 {
                     peerCertDer = cert?.GetRawCertData();
