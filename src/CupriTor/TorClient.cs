@@ -1,7 +1,11 @@
 using CupriTor.Directory;
+using CupriTor.OnionService;
 using CupriTor.Protocol;
 
 namespace CupriTor;
+
+/// <summary>Public summary of a fetched onion-service descriptor (details needed to connect are kept internal).</summary>
+public sealed record OnionDescriptorInfo(int IntroductionPointCount, long RevisionCounter);
 
 /// <summary>Raised when the client cannot bootstrap (fetch or verify a consensus).</summary>
 public sealed class TorBootstrapException(string message, Exception? inner = null) : Exception(message, inner);
@@ -77,6 +81,25 @@ public sealed class TorClient : IAsyncDisposable
 
         (OrConnection conn, Circuit circuit) = await network.BuildCircuitAsync(hops, DateTimeOffset.UtcNow, timeout.Token).ConfigureAwait(false);
         return new TorCircuit(conn, circuit);
+    }
+
+    /// <summary>
+    /// Look up a v3 onion service: derive its blinded key, fetch the descriptor from a responsible HSDir
+    /// over a circuit, verify it, and decrypt it to the introduction points. Returns a summary; this is the
+    /// descriptor stage of connecting to an onion (the introduce/rendezvous stage builds on it).
+    /// </summary>
+    public async Task<OnionDescriptorInfo> LookupOnionAsync(string onion, CancellationToken ct = default)
+    {
+        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before onion lookups.");
+        if (!OnionAddress.TryParse(onion, out OnionAddress address))
+            throw new ArgumentException($"Not a valid v3 .onion address: {onion}", nameof(onion));
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(_options.Timeout);
+
+        var client = new HsDescriptorClient(network);
+        OnionDescriptorResult result = await client.FetchAsync(address, timeout.Token).ConfigureAwait(false);
+        return new OnionDescriptorInfo(result.IntroductionPoints.Count, result.RevisionCounter);
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
