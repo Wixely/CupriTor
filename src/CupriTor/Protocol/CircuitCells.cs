@@ -93,6 +93,46 @@ internal readonly struct LinkSpecifier(byte type, ReadOnlyMemory<byte> data)
         Data.Span.CopyTo(dest.Slice(2));
         return EncodedSize;
     }
+
+    /// <summary>Parse a serialized link-specifier list (NSPEC ‖ [type,len,data]…), e.g. from a descriptor intro point.</summary>
+    public static bool TryParseList(ReadOnlySpan<byte> blob, out List<LinkSpecifier> specifiers)
+    {
+        specifiers = new List<LinkSpecifier>();
+        if (blob.Length < 1) return false;
+        int n = blob[0];
+        int pos = 1;
+        for (int i = 0; i < n; i++)
+        {
+            if (pos + 2 > blob.Length) return false;
+            byte type = blob[pos];
+            int len = blob[pos + 1];
+            pos += 2;
+            if (pos + len > blob.Length) return false;
+            specifiers.Add(new LinkSpecifier(type, blob.Slice(pos, len).ToArray()));
+            pos += len;
+        }
+        return true;
+    }
+
+    /// <summary>Serialize a link-specifier list as NSPEC ‖ [type,len,data]… (the INTRODUCE1 onion-key/link-spec form).</summary>
+    public static byte[] EncodeList(IReadOnlyList<LinkSpecifier> specifiers)
+    {
+        int size = 1;
+        foreach (LinkSpecifier s in specifiers) size += s.EncodedSize;
+        var buffer = new byte[size];
+        buffer[0] = (byte)specifiers.Count;
+        int pos = 1;
+        foreach (LinkSpecifier s in specifiers) pos += s.WriteTo(buffer.AsSpan(pos));
+        return buffer;
+    }
+
+    /// <summary>The 20-byte legacy (RSA) identity from a link-specifier list, or null if absent — used as the ntor node id.</summary>
+    public static byte[]? FindLegacyId(IReadOnlyList<LinkSpecifier> specifiers)
+    {
+        foreach (LinkSpecifier s in specifiers)
+            if (s.Type == TypeLegacyId && s.Data.Length == 20) return s.Data.ToArray();
+        return null;
+    }
 }
 
 /// <summary>An EXTEND2 relay-cell payload: link specifiers + a CREATE2-style handshake (tor-spec §5.1.2).</summary>

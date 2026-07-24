@@ -20,6 +20,16 @@ internal enum RelayCommand : byte
     BeginDir = 13,
     Extend2 = 14,
     Extended2 = 15,
+    // v3 onion-service control commands (rend-spec-v3).
+    EstablishIntro = 32,
+    EstablishRendezvous = 33,
+    Introduce1 = 34,
+    Introduce2 = 35,
+    Rendezvous1 = 36,
+    Rendezvous2 = 37,
+    IntroEstablished = 38,
+    RendezvousEstablished = 39,
+    IntroduceAck = 40,
 }
 
 /// <summary>

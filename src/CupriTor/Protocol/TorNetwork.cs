@@ -74,7 +74,34 @@ internal sealed class TorNetwork
         return (selection.Guard, withFinal);
     }
 
-    private async Task<(OrConnection Connection, Circuit Circuit)> BuildOverPathAsync(GuardEntry guard, RouterStatusEntry[] path, DateTimeOffset now, CancellationToken ct)
+    /// <summary>
+    /// Build a circuit that ends at the introduction point described by <paramref name="introSpecifiers"/> +
+    /// <paramref name="introNtorKey"/> (from a decrypted descriptor): an entry guard, <paramref name="middleCount"/>
+    /// middles, then an EXTEND2 to the intro point using its raw link specifiers.
+    /// </summary>
+    public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitToIntroAsync(
+        IReadOnlyList<LinkSpecifier> introSpecifiers, byte[] introNtorKey, int middleCount, DateTimeOffset now, CancellationToken ct)
+    {
+        (GuardEntry guard, RouterStatusEntry[] path) = SelectPath(middleCount, forcedFinalHop: null, now);
+        return BuildOverPathAsync(guard, path, now, ct, circuit => circuit.ExtendToAsync(introSpecifiers, introNtorKey, ct));
+    }
+
+    /// <summary>Pick a random relay carrying the required flags (bandwidth-weighted), e.g. a rendezvous point.</summary>
+    public RouterStatusEntry? SelectRelay(IReadOnlyCollection<string> requiredFlags)
+    {
+        var perHop = new IReadOnlyCollection<string>[] { requiredFlags };
+        return PathSelector.TrySelect(Consensus.Routers, perHop, _random, out RouterStatusEntry[] path) ? path[0] : null;
+    }
+
+    /// <summary>Resolve a single relay's microdescriptor (ntor onion key + ed25519 identity).</summary>
+    public async Task<Microdescriptor> ResolveMicrodescriptorAsync(RouterStatusEntry relay, CancellationToken ct)
+    {
+        Dictionary<string, Microdescriptor> mds = await ResolveMicrodescriptorsAsync(new[] { relay }, ct).ConfigureAwait(false);
+        return mds[Convert.ToHexString(relay.RsaIdentityDigest)];
+    }
+
+    private async Task<(OrConnection Connection, Circuit Circuit)> BuildOverPathAsync(
+        GuardEntry guard, RouterStatusEntry[] path, DateTimeOffset now, CancellationToken ct, Func<Circuit, Task>? beforeStart = null)
     {
         Dictionary<string, Microdescriptor> mds = await ResolveMicrodescriptorsAsync(path, ct).ConfigureAwait(false);
 
@@ -95,6 +122,8 @@ internal sealed class TorNetwork
             await circuit.CreateFirstHopAsync(hop0, ct).ConfigureAwait(false);
             for (int i = 1; i < path.Length; i++)
                 await circuit.ExtendAsync(HopFor(path[i]), ct).ConfigureAwait(false);
+
+            if (beforeStart is not null) await beforeStart(circuit).ConfigureAwait(false);
 
             Guards.MarkSuccess(guard, now);
             circuit.Start();

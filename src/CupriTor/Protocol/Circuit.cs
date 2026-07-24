@@ -29,6 +29,8 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<ushort, TorStream> _streams = new();
     private readonly ConcurrentDictionary<ushort, TaskCompletionSource<RelayCell>> _pendingOpens = new();
+    private readonly ConcurrentDictionary<RelayCommand, TaskCompletionSource<RelayCell>> _pendingControl = new();
+    private readonly object _hopsLock = new();
 
     private readonly FlowControlWindow _circuitPackage = FlowControlWindow.Circuit();
     private readonly FlowControlWindow _circuitDeliver = FlowControlWindow.Circuit();
@@ -69,17 +71,32 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     }
 
     /// <summary>Extend the circuit to <paramref name="hop"/> with EXTEND2/EXTENDED2 through the current last hop.</summary>
-    public async Task ExtendAsync(RelayHopInfo hop, CancellationToken ct)
+    public Task ExtendAsync(RelayHopInfo hop, CancellationToken ct)
     {
-        (byte[] handshake, Ntor.ClientState state) = Ntor.CreateClient(hop.RsaIdentityDigest, hop.NtorOnionKey);
         var specs = new List<LinkSpecifier>
         {
             LinkSpecifier.FromIPv4(hop.Address, hop.OrPort),
             LinkSpecifier.FromLegacyId(hop.RsaIdentityDigest),
         };
         if (hop.Ed25519Identity is { Length: 32 }) specs.Add(LinkSpecifier.FromEd25519Id(hop.Ed25519Identity));
+        return ExtendCoreAsync(specs, hop.RsaIdentityDigest, hop.NtorOnionKey, ct);
+    }
 
-        byte[] extend2 = new Extend2Payload(specs, HandshakeType.Ntor, handshake).Encode();
+    /// <summary>
+    /// Extend to a relay described by raw link specifiers and an ntor onion key (e.g. a descriptor's
+    /// introduction point). The 20-byte legacy id inside the specifiers is used as the ntor node id.
+    /// </summary>
+    public Task ExtendToAsync(IReadOnlyList<LinkSpecifier> specifiers, byte[] ntorOnionKey, CancellationToken ct)
+    {
+        byte[] nodeId = LinkSpecifier.FindLegacyId(specifiers)
+            ?? throw new CircuitException("Link specifiers have no legacy (RSA) identity to use as the ntor node id.");
+        return ExtendCoreAsync(specifiers, nodeId, ntorOnionKey, ct);
+    }
+
+    private async Task ExtendCoreAsync(IReadOnlyList<LinkSpecifier> specifiers, byte[] nodeId, byte[] ntorOnionKey, CancellationToken ct)
+    {
+        (byte[] handshake, Ntor.ClientState state) = Ntor.CreateClient(nodeId, ntorOnionKey);
+        byte[] extend2 = new Extend2Payload(specifiers, HandshakeType.Ntor, handshake).Encode();
         int lastHop = _hops.Count - 1;
         await SendRelayCellAsync(lastHop, RelayCommand.Extend2, 0, extend2, early: true, ct).ConfigureAwait(false);
 
@@ -91,7 +108,18 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
 
         byte[]? keySeed = Ntor.CompleteClient(state, created2.Data.ToArray());
         if (keySeed is null) throw new CircuitException("ntor AUTH verification failed while extending.");
-        _hops.Add(new RelayCrypto(Ntor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLength)));
+        lock (_hopsLock) _hops.Add(new RelayCrypto(Ntor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLength)));
+    }
+
+    /// <summary>
+    /// Append a virtual hop from externally-derived key material (the hs-ntor rendezvous keys). After a
+    /// RENDEZVOUS2 handshake completes, this adds the onion layer for the hidden service so subsequent
+    /// RELAY cells to the last hop are end-to-end encrypted to it (the rendezvous point just relays them).
+    /// </summary>
+    public void AppendHop(ReadOnlySpan<byte> keyMaterial)
+    {
+        var crypto = new RelayCrypto(keyMaterial);
+        lock (_hopsLock) _hops.Add(crypto);
     }
 
     // ---- operation (after Start) ----
@@ -132,6 +160,30 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         }
         return stream;
     }
+
+    // ---- HS control cells (stream 0) ----
+
+    /// <summary>Register interest in an inbound control relay command; completes when the receive loop dispatches it.</summary>
+    public Task<RelayCell> WaitForAsync(RelayCommand expect, CancellationToken ct)
+    {
+        ThrowIfFaulted();
+        var tcs = new TaskCompletionSource<RelayCell>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingControl[expect] = tcs;
+        ct.Register(() => tcs.TrySetCanceled(ct));
+        return tcs.Task;
+    }
+
+    /// <summary>Send a stream-0 control cell and await a specific reply command (e.g. ESTABLISH_RENDEZVOUS → RENDEZVOUS_ESTABLISHED).</summary>
+    public async Task<RelayCell> SendControlAndAwaitAsync(RelayCommand send, byte[] payload, RelayCommand expect, bool early, CancellationToken ct)
+    {
+        Task<RelayCell> wait = WaitForAsync(expect, ct);
+        await SendRelayCellAsync(_hops.Count - 1, send, 0, payload, early, ct).ConfigureAwait(false);
+        return await wait.ConfigureAwait(false);
+    }
+
+    /// <summary>Send a stream-0 control cell without awaiting a reply.</summary>
+    public Task SendControlAsync(RelayCommand send, byte[] payload, bool early, CancellationToken ct) =>
+        SendRelayCellAsync(_hops.Count - 1, send, 0, payload, early, ct);
 
     // ---- IRelayStreamController (called by TorStream) ----
 
@@ -206,7 +258,6 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     {
         try
         {
-            int last = _hops.Count - 1;
             while (!ct.IsCancellationRequested)
             {
                 Cell cell = await _codec.ReadAsync(_link, ct).ConfigureAwait(false);
@@ -215,6 +266,8 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
                 if (cell.Command is not (CellCommand.Relay or CellCommand.RelayEarly))
                     continue; // ignore non-relay cells (PADDING etc.)
 
+                int last;
+                lock (_hopsLock) last = _hops.Count - 1; // may grow after a RENDEZVOUS2 appends the service hop
                 RelayCell parsed = DecryptAndVerify(cell.Payload.ToArray(), last);
                 await DispatchAsync(parsed, ct).ConfigureAwait(false);
             }
@@ -262,7 +315,10 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
                 throw new CircuitException($"TRUNCATED (reason {ReasonByte(cell.Data)}).");
 
             default:
-                break; // ignore unhandled relay commands
+                // Route HS control replies (RENDEZVOUS_ESTABLISHED, INTRODUCE_ACK, RENDEZVOUS2, …) to any waiter.
+                if (_pendingControl.TryRemove(cell.Command, out TaskCompletionSource<RelayCell>? control))
+                    control.TrySetResult(cell);
+                break;
         }
     }
 
@@ -283,6 +339,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     {
         _fault ??= e;
         foreach (var open in _pendingOpens.Values) open.TrySetException(e);
+        foreach (var control in _pendingControl.Values) control.TrySetException(e);
         foreach (var s in _streams.Values) s.OnEnd();
     }
 

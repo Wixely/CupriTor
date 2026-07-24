@@ -112,6 +112,9 @@ internal static class HsNtor
         return outb;
     }
 
+    /// <summary>The hs-ntor SHA3-256 MAC used for the INTRODUCE1 body: SHA3_256(INT_8(len(key)) ‖ key ‖ message).</summary>
+    public static byte[] Mac256(byte[] key, byte[] message) => Mac(message, key);
+
     private static (byte[] Enc, byte[] Mac) IntroKeys(byte[] introSecret, byte[] subcredential)
     {
         var shake = new ShakeDigest(256);

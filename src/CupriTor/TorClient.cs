@@ -102,6 +102,24 @@ public sealed class TorClient : IAsyncDisposable
         return new OnionDescriptorInfo(result.IntroductionPoints.Count, result.RevisionCounter);
     }
 
+    /// <summary>
+    /// Connect to a v3 onion service and return a duplex <see cref="Stream"/> to the given virtual port:
+    /// fetch the descriptor, establish a rendezvous point, INTRODUCE1 to an introduction point, complete
+    /// the hs-ntor rendezvous, and open an application stream. Disposing the stream tears down the circuit.
+    /// </summary>
+    public async Task<Stream> ConnectToOnionAsync(string onion, int port, CancellationToken ct = default)
+    {
+        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before connecting.");
+        if (!OnionAddress.TryParse(onion, out OnionAddress address))
+            throw new ArgumentException($"Not a valid v3 .onion address: {onion}", nameof(onion));
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(_options.Timeout);
+
+        var connector = new OnionConnector(network);
+        return await connector.ConnectAsync(address, port, timeout.Token).ConfigureAwait(false);
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private static IEnumerable<string> SplitCertificates(string text)
