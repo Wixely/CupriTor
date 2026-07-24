@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="CupriTor.Tests" />
+    <InternalsVisibleTo Include="CupriCollector" />
   </ItemGroup>
 
   <ItemGroup>
