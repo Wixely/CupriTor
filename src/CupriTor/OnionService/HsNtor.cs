@@ -80,9 +80,10 @@ internal static class HsNtor
         if (xy is null || xb is null) return null;
 
         byte[] rendSecret = Concat(xy, xb, authKey, introEncKey, clientPublic, servicePub, ProtoIdBytes);
-        byte[] ntorKeySeed = Mac(rendSecret, THsEnc);
-        byte[] verify = Mac(rendSecret, THsVerify);
-        byte[] auth = Mac(Concat(verify, authKey, introEncKey, servicePub, clientPublic, ProtoIdBytes, ServerStr), THsMac);
+        // MAC key is the secret input; the message is the t-string (tor's crypto_mac_sha3_256 order).
+        byte[] ntorKeySeed = Mac256(rendSecret, THsEnc);
+        byte[] verify = Mac256(rendSecret, THsVerify);
+        byte[] auth = Mac256(Concat(verify, authKey, introEncKey, servicePub, clientPublic, ProtoIdBytes, ServerStr), THsMac);
         return (servicePub, ntorKeySeed, auth);
     }
 
@@ -94,9 +95,10 @@ internal static class HsNtor
         if (yx is null || bx is null) return null;
 
         byte[] rendSecret = Concat(yx, bx, state.AuthKey, state.IntroEncKey, state.ClientPublic, servicePublic, ProtoIdBytes);
-        byte[] ntorKeySeed = Mac(rendSecret, THsEnc);
-        byte[] verify = Mac(rendSecret, THsVerify);
-        byte[] expectedAuth = Mac(Concat(verify, state.AuthKey, state.IntroEncKey, servicePublic, state.ClientPublic, ProtoIdBytes, ServerStr), THsMac);
+        // MAC key is the secret input; the message is the t-string (tor's crypto_mac_sha3_256 order).
+        byte[] ntorKeySeed = Mac256(rendSecret, THsEnc);
+        byte[] verify = Mac256(rendSecret, THsVerify);
+        byte[] expectedAuth = Mac256(Concat(verify, state.AuthKey, state.IntroEncKey, servicePublic, state.ClientPublic, ProtoIdBytes, ServerStr), THsMac);
 
         return CryptographicOperations.FixedTimeEquals(expectedAuth, receivedAuth) ? ntorKeySeed : null;
     }
