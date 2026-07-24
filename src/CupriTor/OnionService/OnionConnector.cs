@@ -66,9 +66,10 @@ internal sealed class OnionConnector
             _trace?.Invoke("rendezvous AUTH verified; splicing service hop");
             rendCircuit.AppendHop(HsNtor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLengthV3Hs));
 
-            // 6. Open the application stream to the service over the completed rendezvous circuit.
-            _trace?.Invoke($"sending RELAY_BEGIN to {onion}:{port}");
-            Stream inner = await rendCircuit.ConnectAsync($"{onion}:{port}", ct).ConfigureAwait(false);
+            // 6. Open the application stream to the service. For a hidden service the RELAY_BEGIN address
+            //    is empty (just ":port") — the service knows its own identity; a non-empty host is rejected.
+            _trace?.Invoke($"sending RELAY_BEGIN to :{port}");
+            Stream inner = await rendCircuit.ConnectAsync($":{port}", ct).ConfigureAwait(false);
             _trace?.Invoke("stream CONNECTED");
             return new OwningStream(inner, rendCircuit, rendConn);
         }

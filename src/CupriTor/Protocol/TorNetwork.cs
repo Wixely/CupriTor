@@ -112,26 +112,38 @@ internal sealed class TorNetwork
         }
 
         RelayHopInfo hop0 = HopFor(path[0]);
-        OrConnection conn = await OrConnection.EstablishAsync(
-            _transport, path[0].Address.ToString(), path[0].OrPort, now,
-            expectedEd25519Identity: hop0.Ed25519Identity, peerAddress: path[0].Address, ct: ct).ConfigureAwait(false);
 
+        // A failure to reach or handshake the guard is the guard's fault; a failure at a later hop is not.
+        OrConnection conn;
+        Circuit circuit;
         try
         {
-            Circuit circuit = conn.CreateCircuit(NextCircuitId());
+            conn = await OrConnection.EstablishAsync(
+                _transport, path[0].Address.ToString(), path[0].OrPort, now,
+                expectedEd25519Identity: hop0.Ed25519Identity, peerAddress: path[0].Address, ct: ct).ConfigureAwait(false);
+            circuit = conn.CreateCircuit(NextCircuitId());
             await circuit.CreateFirstHopAsync(hop0, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            Guards.MarkFailure(guard, now);
+            throw;
+        }
+
+        // The guard connection is up; the guard is good regardless of what happens at later hops.
+        Guards.MarkSuccess(guard, now);
+        try
+        {
             for (int i = 1; i < path.Length; i++)
                 await circuit.ExtendAsync(HopFor(path[i]), ct).ConfigureAwait(false);
 
             if (beforeStart is not null) await beforeStart(circuit).ConfigureAwait(false);
 
-            Guards.MarkSuccess(guard, now);
             circuit.Start();
             return (conn, circuit);
         }
         catch
         {
-            Guards.MarkFailure(guard, now);
             await conn.DisposeAsync().ConfigureAwait(false);
             throw;
         }
