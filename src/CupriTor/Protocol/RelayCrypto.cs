@@ -16,9 +16,10 @@ internal sealed class AesCtrKeystream
     private readonly byte[] _block = new byte[16];
     private int _blockPos = 16; // force a fresh block on first byte
 
-    public AesCtrKeystream(byte[] key)
+    public AesCtrKeystream(byte[] key, ReadOnlySpan<byte> iv = default)
     {
         _engine.Init(forEncryption: true, new KeyParameter(key));
+        if (!iv.IsEmpty) iv.CopyTo(_counter); // initial counter (zero for relay cells; a derived IV for HS descriptors)
     }
 
     public void XorInPlace(Span<byte> data)
