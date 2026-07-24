@@ -15,11 +15,13 @@ internal sealed class OnionConnector
 {
     private readonly TorNetwork _network;
     private readonly int _middleCount;
+    private readonly Action<string>? _trace;
 
-    public OnionConnector(TorNetwork network, int middleCount = 1)
+    public OnionConnector(TorNetwork network, int middleCount = 1, Action<string>? trace = null)
     {
         _network = network;
         _middleCount = middleCount;
+        _trace = trace;
     }
 
     public async Task<Stream> ConnectAsync(OnionAddress onion, int port, CancellationToken ct)
@@ -29,36 +31,45 @@ internal sealed class OnionConnector
         OnionDescriptorResult descriptor = await descriptorClient.FetchAsync(onion, ct).ConfigureAwait(false);
         if (descriptor.IntroductionPoints.Count == 0)
             throw new InvalidOperationException("The onion descriptor carries no introduction points.");
+        _trace?.Invoke($"descriptor decrypted: {descriptor.IntroductionPoints.Count} intro points");
 
         // 2. Choose a rendezvous point and resolve its ntor key + ed25519 id.
         RouterStatusEntry rp = _network.SelectRelay(new[] { "Fast", "Stable" })
             ?? throw new InvalidOperationException("No suitable rendezvous point in the consensus.");
         Microdescriptor rpMd = await _network.ResolveMicrodescriptorAsync(rp, ct).ConfigureAwait(false);
         byte[] rpLinkSpecifiers = LinkSpecifier.EncodeList(RendezvousSpecifiers(rp, rpMd));
+        _trace?.Invoke($"rendezvous point: {rp.Nickname} {rp.Address}:{rp.OrPort}");
 
         // 3. Build the rendezvous circuit and establish the rendezvous point.
         (OrConnection rendConn, Circuit rendCircuit) = await _network.BuildCircuitToAsync(rp, _middleCount, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
         try
         {
+            _trace?.Invoke("rendezvous circuit built; sending ESTABLISH_RENDEZVOUS");
             byte[] cookie = HsCells.NewRendezvousCookie();
             await rendCircuit.SendControlAndAwaitAsync(RelayCommand.EstablishRendezvous, cookie, RelayCommand.RendezvousEstablished, early: false, ct).ConfigureAwait(false);
+            _trace?.Invoke("RENDEZVOUS_ESTABLISHED received");
 
             // Register the RENDEZVOUS2 waiter before introducing, so we can't miss the service's reply.
             Task<RelayCell> rendezvous2 = rendCircuit.WaitForAsync(RelayCommand.Rendezvous2, ct);
 
             // 4. INTRODUCE1 via an introduction point (hs-ntor); returns the client handshake state.
             HsNtor.ClientState hs = await IntroduceAsync(descriptor, rpMd.NtorOnionKey, rpLinkSpecifiers, cookie, ct).ConfigureAwait(false);
+            _trace?.Invoke("INTRODUCE_ACK success; waiting for RENDEZVOUS2");
 
             // 5. Complete the rendezvous handshake and splice the service's onion layer onto the circuit.
             RelayCell reply = await rendezvous2.ConfigureAwait(false);
+            _trace?.Invoke($"RENDEZVOUS2 received ({reply.Data.Length} bytes)");
             if (!HsCells.TryParseRendezvousHandshake(reply.Data.Span, out byte[] servicePublic, out byte[] auth))
                 throw new InvalidOperationException("Malformed RENDEZVOUS2 handshake.");
             byte[]? keySeed = HsNtor.ClientRendezvous(hs, servicePublic, auth)
                 ?? throw new InvalidOperationException("Rendezvous hs-ntor AUTH verification failed.");
+            _trace?.Invoke("rendezvous AUTH verified; splicing service hop");
             rendCircuit.AppendHop(HsNtor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLengthV3Hs));
 
             // 6. Open the application stream to the service over the completed rendezvous circuit.
+            _trace?.Invoke($"sending RELAY_BEGIN to {onion}:{port}");
             Stream inner = await rendCircuit.ConnectAsync($"{onion}:{port}", ct).ConfigureAwait(false);
+            _trace?.Invoke("stream CONNECTED");
             return new OwningStream(inner, rendCircuit, rendConn);
         }
         catch
@@ -81,13 +92,16 @@ internal sealed class OnionConnector
             Circuit? introCircuit = null;
             try
             {
+                _trace?.Invoke("building intro circuit to an introduction point");
                 (introConn, introCircuit) = await _network.BuildCircuitToIntroAsync(introSpecifiers, ip.OnionKeyNtor, _middleCount, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
 
                 HsNtor.ClientState hs = HsNtor.ClientIntroduce(ip.EncKey, ip.AuthKey, descriptor.Subcredential);
                 byte[] introduce1 = HsIntroduce.Build(hs, ip.AuthKey, cookie, rpNtorKey, rpLinkSpecifiers);
 
+                _trace?.Invoke("sending INTRODUCE1");
                 RelayCell ack = await introCircuit.SendControlAndAwaitAsync(RelayCommand.Introduce1, introduce1, RelayCommand.IntroduceAck, early: false, ct).ConfigureAwait(false);
                 int status = ack.Data.Length >= 2 ? BinaryPrimitives.ReadUInt16BigEndian(ack.Data.Span) : -1;
+                _trace?.Invoke($"INTRODUCE_ACK status {status}");
 
                 await introCircuit.DisposeAsync().ConfigureAwait(false);
                 await introConn.DisposeAsync().ConfigureAwait(false);
