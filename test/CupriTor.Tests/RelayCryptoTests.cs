@@ -83,6 +83,41 @@ public class RelayCryptoTests
     }
 
     [Fact]
+    public void V3Hs_RoundTrips_With_Sha3_Digests_And_96Byte_Keys()
+    {
+        var rng = new Random(23);
+        // Client and service share the same 96-byte rendezvous key material (Df32|Db32|Kf16|Kb16).
+        var km = new byte[RelayCrypto.KeyMaterialLengthV3Hs];
+        rng.NextBytes(km);
+        RelayCrypto client = RelayCrypto.CreateV3Hs(km);
+        RelayCrypto service = RelayCrypto.CreateV3Hs(km);
+
+        // Forward (client -> service): seal + digest, then the service opens and verifies.
+        byte[] cell = FreshCell(rng);
+        byte[] plaintext = (byte[])cell.Clone();
+        client.ForwardDigest(cell).CopyTo(cell, DigestOffset);
+        client.CryptForward(cell);
+
+        service.CryptForward(cell);
+        byte[] zeroed = (byte[])cell.Clone();
+        Array.Clear(zeroed, DigestOffset, 4);
+        Assert.Equal(service.ForwardDigest(zeroed), cell[DigestOffset..(DigestOffset + 4)]);
+        Assert.Equal(plaintext, zeroed);
+
+        // Backward (service -> client).
+        byte[] reply = FreshCell(rng);
+        byte[] replyPlain = (byte[])reply.Clone();
+        service.BackwardDigest(reply).CopyTo(reply, DigestOffset);
+        service.CryptBackward(reply);
+
+        client.CryptBackward(reply);
+        byte[] rzeroed = (byte[])reply.Clone();
+        Array.Clear(rzeroed, DigestOffset, 4);
+        Assert.Equal(client.BackwardDigest(rzeroed), reply[DigestOffset..(DigestOffset + 4)]);
+        Assert.Equal(replyPlain, rzeroed);
+    }
+
+    [Fact]
     public void Running_Digest_And_Counter_Chain_Across_Cells()
     {
         var rng = new Random(13);

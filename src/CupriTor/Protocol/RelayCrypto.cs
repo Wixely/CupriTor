@@ -1,6 +1,8 @@
+using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Digests;
 using Org.BouncyCastle.Crypto.Engines;
 using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Utilities;
 
 namespace CupriTor.Protocol;
 
@@ -44,29 +46,45 @@ internal sealed class AesCtrKeystream
 }
 
 /// <summary>
-/// Per-hop relay-cell cryptography (tor-spec §5.5): forward/backward AES-128-CTR layers and the
-/// running SHA-1 integrity digests seeded by Df/Db. Key material is the 72-byte ntor output
-/// (Df‖Db‖Kf‖Kb). The client holds one instance per hop; a relay/onion-service holds one per circuit.
+/// Per-hop relay-cell cryptography (tor-spec §5.5): forward/backward AES-128-CTR layers and the running
+/// integrity digests seeded by Df/Db. Two modes: the legacy ntor hop (72-byte material Df20‖Db20‖Kf16‖Kb16,
+/// SHA-1 running digests) used for normal circuit hops, and the v3 onion-service rendezvous hop (96-byte
+/// material Df32‖Db32‖Kf16‖Kb16, SHA3-256 running digests, rend-spec-v3 §4.2). The client holds one
+/// instance per hop; a relay/onion-service holds one per circuit.
 /// </summary>
 internal sealed class RelayCrypto
 {
-    public const int KeyMaterialLength = 20 + 20 + 16 + 16; // Df, Db, Kf, Kb
+    public const int KeyMaterialLength = 20 + 20 + 16 + 16;      // legacy ntor: SHA-1 digests
+    public const int KeyMaterialLengthV3Hs = 32 + 32 + 16 + 16;  // v3 HS rendezvous: SHA3-256 digests
 
     private readonly AesCtrKeystream _forward;
     private readonly AesCtrKeystream _backward;
-    private readonly Sha1Digest _forwardDigest = new();
-    private readonly Sha1Digest _backwardDigest = new();
+    private readonly IDigest _forwardDigest;
+    private readonly IDigest _backwardDigest;
 
+    /// <summary>Legacy ntor circuit hop (SHA-1 running digests, 72-byte key material).</summary>
     public RelayCrypto(ReadOnlySpan<byte> keyMaterial)
+        : this(keyMaterial, digestSeedLength: 20, useSha3: false) { }
+
+    /// <summary>v3 onion-service rendezvous hop (SHA3-256 running digests, 96-byte key material).</summary>
+    public static RelayCrypto CreateV3Hs(ReadOnlySpan<byte> keyMaterial) =>
+        new(keyMaterial, digestSeedLength: 32, useSha3: true);
+
+    private RelayCrypto(ReadOnlySpan<byte> keyMaterial, int digestSeedLength, bool useSha3)
     {
-        if (keyMaterial.Length < KeyMaterialLength)
-            throw new ArgumentException($"Need {KeyMaterialLength} bytes of key material.", nameof(keyMaterial));
+        const int keyLength = 16; // AES-128 in both modes
+        int need = digestSeedLength * 2 + keyLength * 2;
+        if (keyMaterial.Length < need)
+            throw new ArgumentException($"Need {need} bytes of key material.", nameof(keyMaterial));
 
-        byte[] df = keyMaterial[..20].ToArray();
-        byte[] db = keyMaterial[20..40].ToArray();
-        _forward = new AesCtrKeystream(keyMaterial[40..56].ToArray());
-        _backward = new AesCtrKeystream(keyMaterial[56..72].ToArray());
+        byte[] df = keyMaterial[..digestSeedLength].ToArray();
+        byte[] db = keyMaterial[digestSeedLength..(2 * digestSeedLength)].ToArray();
+        int k = 2 * digestSeedLength;
+        _forward = new AesCtrKeystream(keyMaterial[k..(k + keyLength)].ToArray());
+        _backward = new AesCtrKeystream(keyMaterial[(k + keyLength)..(k + 2 * keyLength)].ToArray());
 
+        _forwardDigest = useSha3 ? new Sha3Digest(256) : new Sha1Digest();
+        _backwardDigest = useSha3 ? new Sha3Digest(256) : new Sha1Digest();
         _forwardDigest.BlockUpdate(df, 0, df.Length);
         _backwardDigest.BlockUpdate(db, 0, db.Length);
     }
@@ -83,10 +101,10 @@ internal sealed class RelayCrypto
     /// <summary>Advance the backward running digest with a cell (digest field must be zeroed) and return its first 4 bytes.</summary>
     public byte[] BackwardDigest(ReadOnlySpan<byte> cellWithZeroedDigest) => Digest(_backwardDigest, cellWithZeroedDigest);
 
-    private static byte[] Digest(Sha1Digest running, ReadOnlySpan<byte> cell)
+    private static byte[] Digest(IDigest running, ReadOnlySpan<byte> cell)
     {
-        running.BlockUpdate(cell);                 // advance the persistent running hash
-        var snapshot = new Sha1Digest(running);    // finalize a copy so the running state continues
+        running.BlockUpdate(cell);                          // advance the persistent running hash
+        var snapshot = (IDigest)((IMemoable)running).Copy(); // finalize a copy so the running state continues
         var full = new byte[snapshot.GetDigestSize()];
         snapshot.DoFinal(full, 0);
         return full[..4];

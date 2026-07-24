@@ -118,7 +118,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     /// </summary>
     public void AppendHop(ReadOnlySpan<byte> keyMaterial)
     {
-        var crypto = new RelayCrypto(keyMaterial);
+        var crypto = RelayCrypto.CreateV3Hs(keyMaterial); // v3 HS rendezvous: SHA3-256 digests
         lock (_hopsLock) _hops.Add(crypto);
     }
 

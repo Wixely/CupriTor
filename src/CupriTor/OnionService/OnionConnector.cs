@@ -55,7 +55,7 @@ internal sealed class OnionConnector
                 throw new InvalidOperationException("Malformed RENDEZVOUS2 handshake.");
             byte[]? keySeed = HsNtor.ClientRendezvous(hs, servicePublic, auth)
                 ?? throw new InvalidOperationException("Rendezvous hs-ntor AUTH verification failed.");
-            rendCircuit.AppendHop(HsNtor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLength));
+            rendCircuit.AppendHop(HsNtor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLengthV3Hs));
 
             // 6. Open the application stream to the service over the completed rendezvous circuit.
             Stream inner = await rendCircuit.ConnectAsync($"{onion}:{port}", ct).ConfigureAwait(false);
