@@ -24,9 +24,25 @@ internal static class PathSelector
         IReadOnlyList<IReadOnlyCollection<string>> requiredFlagsPerHop,
         IRandomSource random,
         out RouterStatusEntry[] path,
+        Func<RouterStatusEntry, IReadOnlySet<string>>? family = null) =>
+        TryExtendPath(routers, Array.Empty<RouterStatusEntry>(), requiredFlagsPerHop, random, out path, family);
+
+    /// <summary>
+    /// Select the remaining hops of a path whose first hops are already chosen (e.g. a fixed entry guard),
+    /// honouring the same distinct-relay, /16 and family constraints against the pre-chosen hops. The
+    /// returned path is <paramref name="prechosen"/> followed by one relay per entry in
+    /// <paramref name="requiredFlagsPerHop"/>.
+    /// </summary>
+    public static bool TryExtendPath(
+        IReadOnlyList<RouterStatusEntry> routers,
+        IReadOnlyList<RouterStatusEntry> prechosen,
+        IReadOnlyList<IReadOnlyCollection<string>> requiredFlagsPerHop,
+        IRandomSource random,
+        out RouterStatusEntry[] path,
         Func<RouterStatusEntry, IReadOnlySet<string>>? family = null)
     {
-        var chosen = new List<RouterStatusEntry>(requiredFlagsPerHop.Count);
+        var chosen = new List<RouterStatusEntry>(prechosen.Count + requiredFlagsPerHop.Count);
+        chosen.AddRange(prechosen);
 
         foreach (IReadOnlyCollection<string> required in requiredFlagsPerHop)
         {
