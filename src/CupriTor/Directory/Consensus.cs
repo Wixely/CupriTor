@@ -41,6 +41,7 @@ internal sealed class Consensus
     public DateTimeOffset ValidUntil { get; private set; }
     public HashSet<string> KnownFlags { get; } = new(StringComparer.Ordinal);
     public byte[]? SharedRandomCurrentValue { get; private set; }
+    public byte[]? SharedRandomPreviousValue { get; private set; }
     public List<RouterStatusEntry> Routers { get; } = new();
     public List<DirectorySignature> Signatures { get; } = new();
 
@@ -106,6 +107,9 @@ internal sealed class Consensus
                     break;
                 case "shared-rand-current-value":
                     if (a.Length >= 2) c.SharedRandomCurrentValue = DirectoryReader.Base64(a[1]);
+                    break;
+                case "shared-rand-previous-value":
+                    if (a.Length >= 2) c.SharedRandomPreviousValue = DirectoryReader.Base64(a[1]);
                     break;
                 case "r":
                     Flush();

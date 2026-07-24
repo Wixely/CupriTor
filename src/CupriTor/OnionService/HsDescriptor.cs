@@ -43,14 +43,15 @@ internal static class HsDescriptor
         sb.Append("descriptor-signing-key-cert\n").Append(PemBlock("ED25519 CERT", cert));
         sb.Append("revision-counter ").Append(revisionCounter).Append('\n');
         sb.Append("superencrypted\n").Append(PemBlock("MESSAGE", superencryptedBlob));
-        sb.Append("signature ");
-        string signedBody = sb.ToString();
+        // The signature covers the descriptor up to and including the newline before "signature"
+        // (i.e. NOT the "signature" keyword itself), prefixed with the signing string.
+        string signedPortion = sb.ToString();
 
-        byte[] toSign = Concat(SignaturePrefix, Encoding.ASCII.GetBytes(signedBody));
+        byte[] toSign = Concat(SignaturePrefix, Encoding.ASCII.GetBytes(signedPortion));
         var signature = new byte[Ed25519.SignatureSize];
         Ed25519.SignWithExpandedKey(signingKey, signingPub, toSign, signature);
 
-        sb.Append(Base64Unpadded(signature)).Append('\n');
+        sb.Append("signature ").Append(Base64Unpadded(signature)).Append('\n');
         return sb.ToString();
     }
 
@@ -94,7 +95,8 @@ internal static class HsDescriptor
 
             int idx = text.IndexOf("\nsignature ", StringComparison.Ordinal);
             if (idx < 0) return false;
-            byte[] signedBody = Encoding.ASCII.GetBytes(text.Substring(0, idx + "\nsignature ".Length));
+            // Signed body ends at (and includes) the newline before "signature".
+            byte[] signedBody = Encoding.ASCII.GetBytes(text.Substring(0, idx + 1));
 
             view = new HsDescriptorView(lifetime, revision, cert, superBlob, signature, signedBody);
             return true;
