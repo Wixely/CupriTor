@@ -47,6 +47,21 @@ public class OnionServiceKeyTests
     }
 
     [Fact]
+    public void ClientAuthorization_KeyPair_RoundTrips_Through_Tor_Format()
+    {
+        (string publicLine, string _, byte[] publicKey, byte[] privateKey) = OnionClientAuthorization.GenerateClientKeyPair();
+
+        Assert.StartsWith("descriptor:x25519:", publicLine);
+        Assert.Equal(32, publicKey.Length);
+        Assert.Equal(32, privateKey.Length);
+
+        // Parsing the formatted public line (with or without prefix) recovers the same key bytes.
+        Assert.Equal(publicKey, OnionClientAuthorization.ParsePublicKey(publicLine));
+        Assert.Equal(publicKey, OnionClientAuthorization.ParsePublicKey(publicLine["descriptor:x25519:".Length..]));
+        Assert.Throws<FormatException>(() => OnionClientAuthorization.ParsePublicKey("not-valid-base32-!!"));
+    }
+
+    [Fact]
     public void Seed_And_Its_Expanded_Form_Agree()
     {
         var seed = new byte[32];

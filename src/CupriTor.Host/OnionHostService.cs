@@ -85,8 +85,14 @@ public sealed class OnionHostService : BackgroundService
             catch { tcp.Dispose(); return null; }
         }
 
+        List<byte[]>? authorized = _config.Onion.AuthorizedClients.Count > 0
+            ? _config.Onion.AuthorizedClients.Select(OnionClientAuthorization.ParsePublicKey).ToList()
+            : null;
+        if (authorized is not null)
+            _log.LogInformation("Private onion: {Count} authorized client(s)", authorized.Count);
+
         _log.LogInformation("Publishing onion service ({IntroPoints} intro points)…", _config.Onion.IntroPoints);
-        _onion = await _tor.PublishOnionAsync(identity, Handler, _config.Onion.IntroPoints, ct).ConfigureAwait(false);
+        _onion = await _tor.PublishOnionAsync(identity, Handler, _config.Onion.IntroPoints, authorized, ct).ConfigureAwait(false);
         _log.LogInformation("Onion front door live: http://{Onion}/ → backend {Host}:{Port}", _onion.OnionAddress, backendHost, backendPort);
     }
 

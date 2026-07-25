@@ -2,6 +2,9 @@ using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using CupriCurve;
+using CupriTor.Protocol;
+using Org.BouncyCastle.Crypto.Agreement;
+using Org.BouncyCastle.Crypto.Digests;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Security;
 
@@ -32,7 +35,8 @@ internal static class HsDescriptorBuilder
         long revisionCounter,
         int lifetimeMinutes,
         DateTimeOffset certExpiration,
-        IReadOnlyList<PublishIntroPoint> introPoints)
+        IReadOnlyList<PublishIntroPoint> introPoints,
+        IReadOnlyList<byte[]>? authorizedClients = null)
     {
         // A fresh per-descriptor signing key; it signs the outer document AND the per-intro certs.
         byte[] signingSeed = RandomBytes(32);
@@ -40,13 +44,21 @@ internal static class HsDescriptorBuilder
         var signingPub = new byte[32];
         signingKey.GetPublicKey(signingPub);
 
-        byte[] secretInput = HsLayerCrypto.SecretInput(blindedPublic, subcredential, revisionCounter);
+        // The outer (superencrypted) layer never uses the cookie. The inner (encrypted) layer uses
+        // SECRET_DATA = blinded ‖ descriptor_cookie when the onion is client-authorized (private).
+        byte[] outerSecretInput = HsLayerCrypto.SecretInput(blindedPublic, subcredential, revisionCounter);
+        bool authorized = authorizedClients is { Count: > 0 };
+        byte[] cookie = authorized ? RandomBytes(16) : Array.Empty<byte>();
+        byte[] innerSecretInput = authorized
+            ? HsLayerCrypto.SecretInput(blindedPublic, subcredential, revisionCounter, cookie)
+            : outerSecretInput;
 
         byte[] innerPlain = ZeroPad(Encoding.ASCII.GetBytes(BuildInnerLayer(introPoints, signingKey, signingPub, certExpiration)), InnerPadMultiple);
-        byte[] innerBlob = HsLayerCrypto.EncryptRandomSalt(innerPlain, secretInput, HsLayerCrypto.EncryptedConstant);
+        byte[] innerBlob = HsLayerCrypto.EncryptRandomSalt(innerPlain, innerSecretInput, HsLayerCrypto.EncryptedConstant);
 
-        byte[] outerPlain = Encoding.ASCII.GetBytes(BuildOuterLayer(innerBlob));
-        byte[] superBlob = HsLayerCrypto.EncryptRandomSalt(outerPlain, secretInput, HsLayerCrypto.SuperencryptedConstant);
+        string authSection = BuildAuthSection(authorizedClients, subcredential, cookie);
+        byte[] outerPlain = Encoding.ASCII.GetBytes(authSection + "encrypted\n" + Pem("MESSAGE", innerBlob));
+        byte[] superBlob = HsLayerCrypto.EncryptRandomSalt(outerPlain, outerSecretInput, HsLayerCrypto.SuperencryptedConstant);
 
         return HsDescriptor.Build(blindedKey, blindedPublic, signingSeed, revisionCounter, lifetimeMinutes, certExpiration, superBlob);
     }
@@ -72,18 +84,54 @@ internal static class HsDescriptorBuilder
         return sb.ToString();
     }
 
-    // Superencrypted (outer) layer: mandatory even with no client auth (rend-spec-v3 §2.5.1.2).
-    private static string BuildOuterLayer(byte[] innerBlob)
+    /// <summary>
+    /// The superencrypted-layer auth header (rend-spec-v3 §2.5.1.2), mandatory even for a public onion:
+    /// desc-auth-type x25519, a fresh ephemeral key, and the auth-client entries. For a private onion each
+    /// entry encrypts the descriptor cookie to an authorized client; the count is padded to a multiple of 16
+    /// with random fakes to hide the client count (a public onion is just 16 fakes).
+    /// </summary>
+    private static string BuildAuthSection(IReadOnlyList<byte[]>? authorizedClients, byte[] subcredential, byte[] cookie)
     {
+        var ephemeral = new X25519PrivateKeyParameters(new SecureRandom());
+        byte[] ephemeralPub = ephemeral.GeneratePublicKey().GetEncoded();
+        byte[] ephemeralPriv = ephemeral.GetEncoded();
+
+        var entries = new List<(byte[] Id, byte[] Iv, byte[] Enc)>();
+        if (authorizedClients is { Count: > 0 })
+            foreach (byte[] clientPub in authorizedClients)
+                entries.Add(AuthClientEntry(ephemeralPriv, clientPub, subcredential, cookie));
+        while (entries.Count == 0 || entries.Count % FakeAuthClients != 0)
+            entries.Add((RandomBytes(8), RandomBytes(16), RandomBytes(16))); // random fakes, indistinguishable
+
         var sb = new StringBuilder();
         sb.Append("desc-auth-type x25519\n");
-        byte[] ephemeral = new X25519PrivateKeyParameters(new SecureRandom()).GeneratePublicKey().GetEncoded();
-        sb.Append("desc-auth-ephemeral-key ").Append(Convert.ToBase64String(ephemeral)).Append('\n');
-        for (int i = 0; i < FakeAuthClients; i++)
-            sb.Append("auth-client ").Append(Unpadded(RandomBytes(8))).Append(' ')
-              .Append(Unpadded(RandomBytes(16))).Append(' ').Append(Unpadded(RandomBytes(16))).Append('\n');
-        sb.Append("encrypted\n").Append(Pem("MESSAGE", innerBlob));
+        sb.Append("desc-auth-ephemeral-key ").Append(Unpadded(ephemeralPub)).Append('\n');
+        foreach ((byte[] id, byte[] iv, byte[] enc) in entries)
+            sb.Append("auth-client ").Append(Unpadded(id)).Append(' ').Append(Unpadded(iv)).Append(' ').Append(Unpadded(enc)).Append('\n');
         return sb.ToString();
+    }
+
+    // One auth-client entry: derive CLIENT-ID(8) + COOKIE-KEY(32) from x25519(ephemeral, client) and the
+    // subcredential, then AES-256-CTR-encrypt the 16-byte descriptor cookie under a random IV.
+    private static (byte[] Id, byte[] Iv, byte[] Enc) AuthClientEntry(byte[] ephemeralPriv, byte[] clientPublic, byte[] subcredential, byte[] cookie)
+    {
+        var agreement = new X25519Agreement();
+        agreement.Init(new X25519PrivateKeyParameters(ephemeralPriv, 0));
+        var secretSeed = new byte[agreement.AgreementSize];
+        agreement.CalculateAgreement(new X25519PublicKeyParameters(clientPublic, 0), secretSeed, 0);
+
+        var shake = new ShakeDigest(256);
+        shake.BlockUpdate(subcredential, 0, subcredential.Length);
+        shake.BlockUpdate(secretSeed, 0, secretSeed.Length);
+        var keys = new byte[40];
+        shake.OutputFinal(keys, 0, keys.Length);
+        byte[] clientId = keys[..8];
+        byte[] cookieKey = keys[8..40]; // 32-byte AES-256 key
+
+        byte[] iv = RandomBytes(16);
+        byte[] enc = (byte[])cookie.Clone();
+        new AesCtrKeystream(cookieKey, iv).XorInPlace(enc);
+        return (clientId, iv, enc);
     }
 
     /// <summary>Curve25519 (Montgomery u) → Ed25519 public key: y = (u-1)/(u+1) mod p, little-endian, sign bit 0.</summary>

@@ -23,6 +23,7 @@ internal sealed class HsService
     private readonly TorNetwork _network;
     private readonly int _introCount;
     private readonly int _middleCount;
+    private readonly IReadOnlyList<byte[]>? _authorizedClients;
     private readonly Action<string>? _trace;
 
     // Reactor state (set in StartAsync, used by the supervisor).
@@ -37,11 +38,12 @@ internal sealed class HsService
     private Task? _supervisor;
     private DateTimeOffset _lastPublish;
 
-    public HsService(TorNetwork network, int introCount = 3, int middleCount = 1, Action<string>? trace = null)
+    public HsService(TorNetwork network, int introCount = 3, int middleCount = 1, IReadOnlyList<byte[]>? authorizedClients = null, Action<string>? trace = null)
     {
         _network = network;
         _introCount = introCount;
         _middleCount = middleCount;
+        _authorizedClients = authorizedClients;
         _trace = trace;
     }
 
@@ -136,7 +138,7 @@ internal sealed class HsService
             (Ed25519ExpandedKey blindedKey, byte[] blindedPub, byte[] subcred) = DerivePeriodKeys(tp);
             subcredentials.Add(subcred);
             long revision = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); // monotonic per blinded key
-            string descriptor = HsDescriptorBuilder.Build(blindedKey, blindedPub, subcred, revision, 180, DateTimeOffset.UtcNow.AddHours(3), publishIps);
+            string descriptor = HsDescriptorBuilder.Build(blindedKey, blindedPub, subcred, revision, 180, DateTimeOffset.UtcNow.AddHours(3), publishIps, _authorizedClients);
             int uploaded = await PublishToHsDirsAsync(blindedPub, tp, _periodLength, srv, descriptor, ct).ConfigureAwait(false);
             total += uploaded;
             _trace?.Invoke($"published TP {tp}: {uploaded} HSDir(s) ({snapshot.Count} intros)");

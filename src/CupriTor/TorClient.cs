@@ -176,10 +176,10 @@ public sealed class TorClient : IAsyncDisposable
     /// streams via <paramref name="targetHandler"/> (which returns a local stream for a requested "host:port",
     /// or null to refuse). Returns the .onion address once published; runs until <paramref name="ct"/> is cancelled.
     /// </summary>
-    public async Task<OnionServiceHost> PublishOnionAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, int introPoints = 3, CancellationToken ct = default)
+    public async Task<OnionServiceHost> PublishOnionAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, int introPoints = 3, IReadOnlyList<byte[]>? authorizedClients = null, CancellationToken ct = default)
     {
         TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before publishing.");
-        var service = new HsService(network, introPoints);
+        var service = new HsService(network, introPoints, authorizedClients: authorizedClients);
         return await service.StartAsync(identity, targetHandler, ct).ConfigureAwait(false);
     }
 

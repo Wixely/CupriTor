@@ -1,8 +1,13 @@
 using System.Net;
 using System.Text;
 using CupriCurve;
+using CupriTor.Directory;
 using CupriTor.OnionService;
 using CupriTor.Protocol;
+using Org.BouncyCastle.Crypto.Agreement;
+using Org.BouncyCastle.Crypto.Digests;
+using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Security;
 using Xunit;
 
 namespace CupriTor.Tests;
@@ -120,6 +125,92 @@ public class HsDescriptorTests
         Assert.Equal(ips[0].EncKeyPublic, parsed[0].EncKey);
         Assert.Equal(ips[0].IntroRelayNtorKey, parsed[0].OnionKeyNtor);
         Assert.Equal(ips[1].AuthKeyPublic, parsed[1].AuthKey);
+    }
+
+    [Fact]
+    public void Private_Descriptor_Only_Authorized_Client_Can_Decrypt()
+    {
+        Service svc = MakeService(0x60);
+        byte[] subcred = HsBlinding.Subcredential(svc.IdentityPublic, svc.BlindedPublic);
+
+        // The authorized client's x25519 keypair.
+        var clientPriv = new X25519PrivateKeyParameters(new SecureRandom());
+        byte[] clientPub = clientPriv.GeneratePublicKey().GetEncoded();
+        byte[] clientPrivRaw = clientPriv.GetEncoded();
+
+        var rng = new Random(11);
+        byte[] Rand(int n) { var a = new byte[n]; rng.NextBytes(a); return a; }
+        var specs = LinkSpecifier.EncodeList(new List<LinkSpecifier>
+        {
+            LinkSpecifier.FromIPv4(IPAddress.Parse("10.1.2.3"), 9001),
+            LinkSpecifier.FromLegacyId(Rand(20)),
+        });
+        var authKey = Ed25519ExpandedKey.FromSeed(Rand(32));
+        var authPub = new byte[32];
+        authKey.GetPublicKey(authPub);
+        var ips = new List<PublishIntroPoint> { new(specs, Rand(32), authPub, Rand(32)) };
+
+        // Service publishes a PRIVATE descriptor authorizing this one client.
+        string descriptor = HsDescriptorBuilder.Build(svc.BlindedKey, svc.BlindedPublic, subcred, Revision, 180, Now.AddHours(3), ips, new[] { clientPub });
+
+        // Client: verify + decrypt the outer (no cookie) layer.
+        Assert.True(HsDescriptor.TryParse(descriptor, out HsDescriptorView view));
+        var clientBlinded = new byte[32];
+        HsBlinding.TryBlindPublicKey(svc.IdentityPublic, svc.Tp, PeriodLen, clientBlinded);
+        Assert.True(view.TryVerify(clientBlinded, out _));
+        byte[] clientSubcred = HsBlinding.Subcredential(svc.IdentityPublic, clientBlinded);
+        byte[] outerSecret = HsLayerCrypto.SecretInput(clientBlinded, clientSubcred, view.RevisionCounter);
+        Assert.True(HsLayerCrypto.TryDecrypt(view.SuperencryptedBlob.Span, outerSecret, HsLayerCrypto.SuperencryptedConstant, out byte[] outerPlain));
+
+        // The authorized client recovers the descriptor cookie and decrypts the inner layer.
+        byte[]? cookie = RecoverCookie(outerPlain, clientPrivRaw, clientSubcred);
+        Assert.NotNull(cookie);
+        Assert.True(HsSuperencryptedLayer.TryExtractInner(outerPlain, out byte[] innerBlob));
+        byte[] innerSecret = HsLayerCrypto.SecretInput(clientBlinded, clientSubcred, view.RevisionCounter, cookie);
+        Assert.True(HsLayerCrypto.TryDecrypt(innerBlob, innerSecret, HsLayerCrypto.EncryptedConstant, out byte[] innerPlain));
+        Assert.True(HsInnerLayer.TryParse(innerPlain, out List<IntroductionPoint> parsed));
+        Assert.Single(parsed);
+        Assert.Equal(authPub, parsed[0].AuthKey);
+
+        // An UNAUTHORIZED client (different key) cannot find its entry / recover the cookie.
+        byte[] stranger = new X25519PrivateKeyParameters(new SecureRandom()).GetEncoded();
+        Assert.Null(RecoverCookie(outerPlain, stranger, clientSubcred));
+    }
+
+    // Client-side recovery of the descriptor cookie from the decrypted superencrypted layer (rend-spec-v3 §2.5.1.3).
+    private static byte[]? RecoverCookie(byte[] outerPlain, byte[] clientPrivate, byte[] subcredential)
+    {
+        byte[]? ephemeralPub = null;
+        var entries = new List<(byte[] Id, byte[] Iv, byte[] Enc)>();
+        foreach (DirectoryItem item in DirectoryReader.Parse(Encoding.ASCII.GetString(outerPlain)))
+        {
+            if (item.Keyword == "desc-auth-ephemeral-key") ephemeralPub = DirectoryReader.Base64(item.Arguments[0]);
+            else if (item.Keyword == "auth-client")
+                entries.Add((DirectoryReader.Base64(item.Arguments[0]), DirectoryReader.Base64(item.Arguments[1]), DirectoryReader.Base64(item.Arguments[2])));
+        }
+        if (ephemeralPub is null) return null;
+
+        var ag = new X25519Agreement();
+        ag.Init(new X25519PrivateKeyParameters(clientPrivate, 0));
+        var seed = new byte[ag.AgreementSize];
+        ag.CalculateAgreement(new X25519PublicKeyParameters(ephemeralPub, 0), seed, 0);
+
+        var shake = new ShakeDigest(256);
+        shake.BlockUpdate(subcredential, 0, subcredential.Length);
+        shake.BlockUpdate(seed, 0, seed.Length);
+        var keys = new byte[40];
+        shake.OutputFinal(keys, 0, keys.Length);
+        byte[] clientId = keys[..8];
+        byte[] cookieKey = keys[8..40];
+
+        foreach ((byte[] id, byte[] iv, byte[] enc) in entries)
+            if (id.AsSpan().SequenceEqual(clientId))
+            {
+                byte[] cookie = (byte[])enc.Clone();
+                new AesCtrKeystream(cookieKey, iv).XorInPlace(cookie);
+                return cookie;
+            }
+        return null;
     }
 
     [Fact]

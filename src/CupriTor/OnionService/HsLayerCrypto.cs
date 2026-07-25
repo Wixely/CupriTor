@@ -23,13 +23,19 @@ internal static class HsLayerCrypto
     public static readonly byte[] SuperencryptedConstant = Encoding.ASCII.GetBytes("hsdir-superencrypted-data");
     public static readonly byte[] EncryptedConstant = Encoding.ASCII.GetBytes("hsdir-encrypted-data");
 
-    /// <summary>secret_input = blinded_public_key ‖ subcredential ‖ INT_8(revision_counter).</summary>
-    public static byte[] SecretInput(ReadOnlySpan<byte> blindedKey, ReadOnlySpan<byte> subcredential, long revisionCounter)
+    /// <summary>
+    /// secret_input = SECRET_DATA ‖ subcredential ‖ INT_8(revision_counter), where SECRET_DATA is the
+    /// blinded public key, optionally followed by the 16-byte descriptor cookie for a client-authorized
+    /// (private) onion's INNER layer. The outer/superencrypted layer never includes the cookie.
+    /// </summary>
+    public static byte[] SecretInput(ReadOnlySpan<byte> blindedKey, ReadOnlySpan<byte> subcredential, long revisionCounter, ReadOnlySpan<byte> descriptorCookie = default)
     {
-        var si = new byte[32 + 32 + 8];
+        int secretDataLen = 32 + descriptorCookie.Length;
+        var si = new byte[secretDataLen + 32 + 8];
         blindedKey.Slice(0, 32).CopyTo(si);
-        subcredential.Slice(0, 32).CopyTo(si.AsSpan(32));
-        BinaryPrimitives.WriteInt64BigEndian(si.AsSpan(64), revisionCounter);
+        if (!descriptorCookie.IsEmpty) descriptorCookie.CopyTo(si.AsSpan(32));
+        subcredential.Slice(0, 32).CopyTo(si.AsSpan(secretDataLen));
+        BinaryPrimitives.WriteInt64BigEndian(si.AsSpan(secretDataLen + 32), revisionCounter);
         return si;
     }
 
