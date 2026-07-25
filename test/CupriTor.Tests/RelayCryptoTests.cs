@@ -144,6 +144,40 @@ public class RelayCryptoTests
     }
 
     [Fact]
+    public void V3Hs_Client_And_Reversed_Service_Interoperate()
+    {
+        // The onion service uses the REVERSED crypto (CreateV3HsService). A client (CreateV3Hs) and a service
+        // sharing the same 128-byte material must interoperate: client-forward is read by the service's backward
+        // path, and service-forward is read by the client's backward path. (If both used CreateV3Hs — the
+        // self-consistent-but-wrong trap — this cross pattern would fail.)
+        var rng = new Random(31);
+        var km = new byte[RelayCrypto.KeyMaterialLengthV3Hs];
+        rng.NextBytes(km);
+        RelayCrypto client = RelayCrypto.CreateV3Hs(km);
+        RelayCrypto service = RelayCrypto.CreateV3HsService(km);
+
+        byte[] cell = FreshCell(rng);
+        byte[] plain = (byte[])cell.Clone();
+        client.ForwardDigest(cell).CopyTo(cell, DigestOffset);
+        client.CryptForward(cell);
+        service.CryptBackward(cell); // service reads client-forward via its backward path
+        byte[] z = (byte[])cell.Clone();
+        Array.Clear(z, DigestOffset, 4);
+        Assert.Equal(service.BackwardDigest(z), cell[DigestOffset..(DigestOffset + 4)]);
+        Assert.Equal(plain, z);
+
+        byte[] reply = FreshCell(rng);
+        byte[] replyPlain = (byte[])reply.Clone();
+        service.ForwardDigest(reply).CopyTo(reply, DigestOffset);
+        service.CryptForward(reply);
+        client.CryptBackward(reply); // client reads service-forward via its backward path
+        byte[] rz = (byte[])reply.Clone();
+        Array.Clear(rz, DigestOffset, 4);
+        Assert.Equal(client.BackwardDigest(rz), reply[DigestOffset..(DigestOffset + 4)]);
+        Assert.Equal(replyPlain, rz);
+    }
+
+    [Fact]
     public void Running_Digest_And_Counter_Chain_Across_Cells()
     {
         var rng = new Random(13);

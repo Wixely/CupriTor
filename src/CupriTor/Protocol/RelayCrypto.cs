@@ -64,13 +64,21 @@ internal sealed class RelayCrypto
 
     /// <summary>Legacy ntor circuit hop (SHA-1 running digests, AES-128, 72-byte key material).</summary>
     public RelayCrypto(ReadOnlySpan<byte> keyMaterial)
-        : this(keyMaterial, digestSeedLength: 20, keyLength: 16, useSha3: false) { }
+        : this(keyMaterial, digestSeedLength: 20, keyLength: 16, useSha3: false, reverse: false) { }
 
-    /// <summary>v3 onion-service rendezvous hop (SHA3-256 running digests, AES-256, 128-byte key material).</summary>
+    /// <summary>v3 onion-service rendezvous hop, CLIENT side (SHA3-256 digests, AES-256, 128-byte key material).</summary>
     public static RelayCrypto CreateV3Hs(ReadOnlySpan<byte> keyMaterial) =>
-        new(keyMaterial, digestSeedLength: 32, keyLength: 32, useSha3: true);
+        new(keyMaterial, digestSeedLength: 32, keyLength: 32, useSha3: true, reverse: false);
 
-    private RelayCrypto(ReadOnlySpan<byte> keyMaterial, int digestSeedLength, int keyLength, bool useSha3)
+    /// <summary>
+    /// v3 onion-service rendezvous hop, SERVICE side. Same 128-byte material as the client, but forward and
+    /// backward are swapped (tor's tor1_crypt_init reverse=is_service_side): f_digest=Db, b_digest=Df,
+    /// f_crypto=Kb, b_crypto=Kf — the mirror of the client so the two ends interoperate.
+    /// </summary>
+    public static RelayCrypto CreateV3HsService(ReadOnlySpan<byte> keyMaterial) =>
+        new(keyMaterial, digestSeedLength: 32, keyLength: 32, useSha3: true, reverse: true);
+
+    private RelayCrypto(ReadOnlySpan<byte> keyMaterial, int digestSeedLength, int keyLength, bool useSha3, bool reverse)
     {
         int need = digestSeedLength * 2 + keyLength * 2;
         if (keyMaterial.Length < need)
@@ -79,13 +87,17 @@ internal sealed class RelayCrypto
         byte[] df = keyMaterial[..digestSeedLength].ToArray();
         byte[] db = keyMaterial[digestSeedLength..(2 * digestSeedLength)].ToArray();
         int k = 2 * digestSeedLength;
-        _forward = new AesCtrKeystream(keyMaterial[k..(k + keyLength)].ToArray());       // AES-128 or AES-256 by key length
-        _backward = new AesCtrKeystream(keyMaterial[(k + keyLength)..(k + 2 * keyLength)].ToArray());
+        var kf = new AesCtrKeystream(keyMaterial[k..(k + keyLength)].ToArray());          // AES-128 or AES-256 by key length
+        var kb = new AesCtrKeystream(keyMaterial[(k + keyLength)..(k + 2 * keyLength)].ToArray());
 
-        _forwardDigest = useSha3 ? new Sha3Digest(256) : new Sha1Digest();
-        _backwardDigest = useSha3 ? new Sha3Digest(256) : new Sha1Digest();
-        _forwardDigest.BlockUpdate(df, 0, df.Length);
-        _backwardDigest.BlockUpdate(db, 0, db.Length);
+        IDigest dfDigest = useSha3 ? new Sha3Digest(256) : new Sha1Digest();
+        IDigest dbDigest = useSha3 ? new Sha3Digest(256) : new Sha1Digest();
+        dfDigest.BlockUpdate(df, 0, df.Length);
+        dbDigest.BlockUpdate(db, 0, db.Length);
+
+        // Canonical: forward = Kf/Df, backward = Kb/Db. Service side swaps f<->b (after slicing, not by re-slicing).
+        (_forward, _backward) = reverse ? (kb, kf) : (kf, kb);
+        (_forwardDigest, _backwardDigest) = reverse ? (dbDigest, dfDigest) : (dfDigest, dbDigest);
     }
 
     /// <summary>Apply/remove one forward (client→relay) crypto layer in place. Encryption and decryption are identical.</summary>

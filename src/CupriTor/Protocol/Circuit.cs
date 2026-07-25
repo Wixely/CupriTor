@@ -25,7 +25,9 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     private readonly CellCodec _codec;
     private readonly uint _circId;
 
+    private const int KhLength = 20; // per-circuit nonce KH: the final 20 bytes of the ntor KDF output
     private readonly List<RelayCrypto> _hops = new();
+    private readonly List<byte[]> _hopKh = new();  // KH of each ntor hop (for ESTABLISH_INTRO's HANDSHAKE_AUTH)
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<ushort, TorStream> _streams = new();
     private readonly ConcurrentDictionary<ushort, TaskCompletionSource<RelayCell>> _pendingOpens = new();
@@ -67,8 +69,22 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
 
         byte[]? keySeed = Ntor.CompleteClient(state, created2.Data.ToArray());
         if (keySeed is null) throw new CircuitException("ntor AUTH verification failed for the first hop.");
-        _hops.Add(new RelayCrypto(Ntor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLength)));
+        AddNtorHop(keySeed);
     }
+
+    /// <summary>Derive the 92-byte ntor material, add the hop's RelayCrypto (first 72 bytes) and stash its KH (last 20).</summary>
+    private void AddNtorHop(byte[] keySeed)
+    {
+        byte[] km = Ntor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLength + KhLength); // Df|Db|Kf|Kb|KH
+        lock (_hopsLock)
+        {
+            _hops.Add(new RelayCrypto(km));
+            _hopKh.Add(km[RelayCrypto.KeyMaterialLength..].ToArray());
+        }
+    }
+
+    /// <summary>The KH (circuit nonce) of the last ntor hop — the MAC key for an ESTABLISH_INTRO on this circuit.</summary>
+    public byte[] LastKh => _hopKh[^1];
 
     /// <summary>Extend the circuit to <paramref name="hop"/> with EXTEND2/EXTENDED2 through the current last hop.</summary>
     public Task ExtendAsync(RelayHopInfo hop, CancellationToken ct)
@@ -108,7 +124,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
 
         byte[]? keySeed = Ntor.CompleteClient(state, created2.Data.ToArray());
         if (keySeed is null) throw new CircuitException("ntor AUTH verification failed while extending.");
-        lock (_hopsLock) _hops.Add(new RelayCrypto(Ntor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLength)));
+        AddNtorHop(keySeed);
     }
 
     /// <summary>
@@ -118,7 +134,17 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     /// </summary>
     public void AppendHop(ReadOnlySpan<byte> keyMaterial)
     {
-        var crypto = RelayCrypto.CreateV3Hs(keyMaterial); // v3 HS rendezvous: SHA3-256 digests
+        var crypto = RelayCrypto.CreateV3Hs(keyMaterial); // v3 HS rendezvous, client side (SHA3-256 + AES-256)
+        lock (_hopsLock) _hops.Add(crypto);
+    }
+
+    /// <summary>
+    /// Append the spliced rendezvous hop from the SERVICE side (reversed forward/backward). The onion service
+    /// is the far end of the rendezvous circuit, so its relay crypto mirrors the client's (tor's is_service_side).
+    /// </summary>
+    public void AppendHopReversed(ReadOnlySpan<byte> keyMaterial)
+    {
+        var crypto = RelayCrypto.CreateV3HsService(keyMaterial);
         lock (_hopsLock) _hops.Add(crypto);
     }
 
