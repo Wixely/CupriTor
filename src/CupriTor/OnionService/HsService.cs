@@ -38,16 +38,15 @@ internal sealed class HsService
         OrConnection Connection, Circuit Circuit);
 
     /// <summary>
-    /// Start hosting the onion service for <paramref name="identitySeed"/> (32-byte Ed25519 seed). Inbound
-    /// streams are served by <paramref name="targetHandler"/> ("host:port" → local stream, or null to refuse).
-    /// Returns the .onion address; the service keeps running until <paramref name="ct"/> is cancelled.
+    /// Start hosting the onion service for <paramref name="identity"/>. Inbound streams are served by
+    /// <paramref name="targetHandler"/> ("host:port" → local stream, or null to refuse). Returns the .onion
+    /// address; the service keeps running until <paramref name="ct"/> is cancelled.
     /// </summary>
-    public async Task<string> StartAsync(byte[] identitySeed, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
+    public async Task<string> StartAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
     {
-        var identityKey = Ed25519ExpandedKey.FromSeed(identitySeed);
-        var identityPub = new byte[32];
-        identityKey.GetPublicKey(identityPub);
-        string onion = OnionAddress.FromPublicKey(identityPub).ToString();
+        Ed25519ExpandedKey identityKey = identity.ExpandedKey;
+        byte[] identityPub = identity.PublicKey;
+        string onion = identity.OnionAddress;
         _trace?.Invoke($"identity → {onion}");
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
