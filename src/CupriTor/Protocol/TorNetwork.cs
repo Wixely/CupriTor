@@ -17,20 +17,28 @@ internal sealed class TorNetwork
     private readonly IRandomSource _random;
     private readonly TimeSpan _timeout;
     private uint _circIdCounter;
+    private volatile Consensus _consensus;
 
-    public Consensus Consensus { get; }
+    /// <summary>The current verified consensus. Swapped atomically by <see cref="UpdateConsensus"/> on refresh.</summary>
+    public Consensus Consensus => _consensus;
     public EntryGuardManager Guards { get; }
+
+    /// <summary>The directory source used for fetching documents (consensus refresh, microdescriptors).</summary>
+    public IDirectorySource DirectorySource => _dir;
 
     public TorNetwork(Consensus consensus, EntryGuardManager guards, IDirectorySource dir,
         ITlsTransport transport, IRandomSource random, TimeSpan timeout)
     {
-        Consensus = consensus;
+        _consensus = consensus;
         Guards = guards;
         _dir = dir;
         _transport = transport;
         _random = random;
         _timeout = timeout;
     }
+
+    /// <summary>Atomically replace the consensus (after a fresh fetch + verification). New circuits/rings use it immediately.</summary>
+    public void UpdateConsensus(Consensus consensus) => _consensus = consensus;
 
     /// <summary>
     /// Build a circuit of <paramref name="length"/> hops (entry guard + middles), establish the OR

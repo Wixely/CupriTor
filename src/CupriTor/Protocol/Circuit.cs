@@ -53,6 +53,12 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
 
     public int HopCount => _hops.Count;
 
+    /// <summary>True once the circuit has faulted (DESTROY, integrity failure, or the link dropped).</summary>
+    public bool IsFaulted => _fault is not null;
+
+    /// <summary>Completes when the receive loop ends (fault or shutdown) — lets a supervisor detect a dead circuit.</summary>
+    public Task Completion => _receiveLoop ?? Task.CompletedTask;
+
     // ---- building (call before Start) ----
 
     /// <summary>Establish the first hop with an ntor CREATE2/CREATED2 exchange.</summary>

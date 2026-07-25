@@ -17,10 +17,26 @@ internal sealed class HsService
 {
     private static readonly byte[] BlindPersonalization = Encoding.ASCII.GetBytes("Derive temporary signing key hash input");
 
+    private static readonly TimeSpan HealthInterval = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan RepublishInterval = TimeSpan.FromMinutes(60);
+
     private readonly TorNetwork _network;
     private readonly int _introCount;
     private readonly int _middleCount;
     private readonly Action<string>? _trace;
+
+    // Reactor state (set in StartAsync, used by the supervisor).
+    private readonly List<IntroPoint> _intros = new();
+    private readonly object _introLock = new();
+    private Ed25519ExpandedKey _blindedKey;
+    private byte[] _blindedPub = Array.Empty<byte>();
+    private byte[] _subcredential = Array.Empty<byte>();
+    private long _timePeriod;
+    private int _periodLength;
+    private Func<string, CancellationToken, Task<Stream?>> _targetHandler = (_, _) => Task.FromResult<Stream?>(null);
+    private CancellationTokenSource? _cts;
+    private Task? _supervisor;
+    private DateTimeOffset _lastPublish;
 
     public HsService(TorNetwork network, int introCount = 3, int middleCount = 1, Action<string>? trace = null)
     {
@@ -39,58 +55,143 @@ internal sealed class HsService
 
     /// <summary>
     /// Start hosting the onion service for <paramref name="identity"/>. Inbound streams are served by
-    /// <paramref name="targetHandler"/> ("host:port" → local stream, or null to refuse). Returns the .onion
-    /// address; the service keeps running until <paramref name="ct"/> is cancelled.
+    /// <paramref name="targetHandler"/> ("host:port" → local stream, or null to refuse). Returns a durable
+    /// <see cref="OnionServiceHost"/> that keeps the intro points healthy and re-publishes automatically until
+    /// disposed (or <paramref name="ct"/> is cancelled).
     /// </summary>
-    public async Task<string> StartAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
+    public async Task<OnionServiceHost> StartAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
     {
+        _targetHandler = targetHandler;
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        CancellationToken token = _cts.Token;
+
         Ed25519ExpandedKey identityKey = identity.ExpandedKey;
         byte[] identityPub = identity.PublicKey;
-        string onion = identity.OnionAddress;
-        _trace?.Invoke($"identity → {onion}");
+        _trace?.Invoke($"identity → {identity.OnionAddress}");
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        int len = HsTimePeriod.DefaultLengthMinutes;
-        long tp = HsTimePeriod.Number(now, len);
+        _periodLength = HsTimePeriod.DefaultLengthMinutes;
+        _timePeriod = HsTimePeriod.Number(now, _periodLength);
 
         // Per-period blinded key: private (to sign the descriptor) + public (for the ring/subcredential).
-        byte[] factor = HsBlinding.BlindingFactor(identityPub, tp, len);
+        byte[] factor = HsBlinding.BlindingFactor(identityPub, _timePeriod, _periodLength);
         var aPrime = new byte[32];
         var rhPrime = new byte[32];
         TorBlinding.BlindPrivateKey(identityKey, factor, BlindPersonalization, aPrime, rhPrime);
-        var blindedKey = Ed25519ExpandedKey.FromParts(aPrime, rhPrime);
-        var blindedPub = new byte[32];
-        if (!HsBlinding.TryBlindPublicKey(identityPub, tp, len, blindedPub))
+        _blindedKey = Ed25519ExpandedKey.FromParts(aPrime, rhPrime);
+        _blindedPub = new byte[32];
+        if (!HsBlinding.TryBlindPublicKey(identityPub, _timePeriod, _periodLength, _blindedPub))
             throw new InvalidOperationException("Could not derive the blinded public key.");
-        byte[] subcredential = HsBlinding.Subcredential(identityPub, blindedPub);
+        _subcredential = HsBlinding.Subcredential(identityPub, _blindedPub);
 
         // 1. Establish introduction points.
-        List<IntroPoint> intros = await EstablishIntroPointsAsync(now, ct).ConfigureAwait(false);
+        List<IntroPoint> intros = await EstablishIntroPointsAsync(now, _introCount, new HashSet<string>(), token).ConfigureAwait(false);
         if (intros.Count == 0) throw new InvalidOperationException("Could not establish any introduction points.");
+        lock (_introLock) _intros.AddRange(intros);
         _trace?.Invoke($"established {intros.Count} introduction points");
 
         // 2. Build + publish the descriptor.
-        var publishIps = intros.Select(ip => new PublishIntroPoint(ip.LinkSpecifierBlock, ip.IntroRelayNtorKey, ip.AuthKeyPublic, ip.EncKeyPublic)).ToList();
-        long revision = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        string descriptor = HsDescriptorBuilder.Build(blindedKey, blindedPub, subcredential, revision, 180, now.AddHours(3), publishIps);
-        int uploaded = await PublishAsync(blindedPub, tp, len, descriptor, ct).ConfigureAwait(false);
-        _trace?.Invoke($"published descriptor to {uploaded} HSDir(s)");
+        int uploaded = await PublishOnceAsync(token).ConfigureAwait(false);
         if (uploaded == 0) throw new InvalidOperationException("Descriptor upload failed to every responsible HSDir.");
 
-        // 3. Accept introductions on each intro circuit.
-        foreach (IntroPoint ip in intros)
-            _ = AcceptLoopAsync(ip, subcredential, targetHandler, ct);
+        // 3. Accept introductions on each intro circuit + start the supervisor (health + re-publish).
+        foreach (IntroPoint ip in intros) StartAcceptLoop(ip, token);
+        _supervisor = Task.Run(() => SuperviseAsync(token));
 
-        return onion;
+        return new OnionServiceHost(identity.OnionAddress, this);
     }
 
-    private async Task<List<IntroPoint>> EstablishIntroPointsAsync(DateTimeOffset now, CancellationToken ct)
+    private void StartAcceptLoop(IntroPoint ip, CancellationToken ct) => _ = AcceptLoopAsync(ip, _subcredential, _targetHandler, ct);
+
+    /// <summary>Build the descriptor from the current intro set and upload it to the responsible HSDirs. Returns the count.</summary>
+    private async Task<int> PublishOnceAsync(CancellationToken ct)
+    {
+        List<IntroPoint> snapshot;
+        lock (_introLock) snapshot = _intros.ToList();
+        if (snapshot.Count == 0) return 0;
+
+        var publishIps = snapshot.Select(ip => new PublishIntroPoint(ip.LinkSpecifierBlock, ip.IntroRelayNtorKey, ip.AuthKeyPublic, ip.EncKeyPublic)).ToList();
+        long revision = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); // monotonic per blinded key
+        string descriptor = HsDescriptorBuilder.Build(_blindedKey, _blindedPub, _subcredential, revision, 180, DateTimeOffset.UtcNow.AddHours(3), publishIps);
+        int uploaded = await PublishToHsDirsAsync(_blindedPub, _timePeriod, _periodLength, descriptor, ct).ConfigureAwait(false);
+        _lastPublish = DateTimeOffset.UtcNow;
+        _trace?.Invoke($"(re)published to {uploaded} HSDir(s) (rev {revision}, {snapshot.Count} intros)");
+        return uploaded;
+    }
+
+    /// <summary>Supervisor: replace dead intro points and re-publish periodically so the service stays reachable.</summary>
+    private async Task SuperviseAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(HealthInterval, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+
+            try
+            {
+                bool changed = await EnsureIntroPointsAsync(ct).ConfigureAwait(false);
+                if (changed || DateTimeOffset.UtcNow - _lastPublish >= RepublishInterval)
+                    await PublishOnceAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception e) { _trace?.Invoke($"supervisor: {e.Message}"); }
+        }
+    }
+
+    /// <summary>Drop faulted intro points and top the set back up to the target count. Returns true if the set changed.</summary>
+    private async Task<bool> EnsureIntroPointsAsync(CancellationToken ct)
+    {
+        List<IntroPoint> dead;
+        lock (_introLock)
+        {
+            dead = _intros.Where(ip => ip.Circuit.IsFaulted).ToList();
+            _intros.RemoveAll(ip => ip.Circuit.IsFaulted);
+        }
+        foreach (IntroPoint d in dead)
+        {
+            _trace?.Invoke($"intro point {d.Relay.Nickname} died; replacing");
+            try { await d.Connection.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
+
+        HashSet<string> have;
+        int need;
+        lock (_introLock)
+        {
+            have = _intros.Select(ip => Convert.ToHexString(ip.Relay.RsaIdentityDigest)).ToHashSet();
+            need = _introCount - _intros.Count;
+        }
+        if (need <= 0) return dead.Count > 0;
+
+        List<IntroPoint> fresh = await EstablishIntroPointsAsync(DateTimeOffset.UtcNow, need, have, ct).ConfigureAwait(false);
+        lock (_introLock) _intros.AddRange(fresh);
+        foreach (IntroPoint ip in fresh) StartAcceptLoop(ip, ct);
+        return dead.Count > 0 || fresh.Count > 0;
+    }
+
+    /// <summary>Stop the service: cancel loops, tear down all intro circuits.</summary>
+    public async ValueTask StopAsync()
+    {
+        _cts?.Cancel();
+        if (_supervisor is not null)
+        {
+            try { await _supervisor.ConfigureAwait(false); } catch { }
+        }
+        List<IntroPoint> snapshot;
+        lock (_introLock) { snapshot = _intros.ToList(); _intros.Clear(); }
+        foreach (IntroPoint ip in snapshot)
+        {
+            try { await ip.Connection.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
+        _cts?.Dispose();
+    }
+
+    private async Task<List<IntroPoint>> EstablishIntroPointsAsync(DateTimeOffset now, int count, HashSet<string> exclude, CancellationToken ct)
     {
         var intros = new List<IntroPoint>();
-        var used = new HashSet<string>();
+        var used = new HashSet<string>(exclude);
         var rng = new SecureRandom();
 
-        for (int attempt = 0; attempt < _introCount * 4 && intros.Count < _introCount; attempt++)
+        for (int attempt = 0; attempt < count * 4 && intros.Count < count; attempt++)
         {
             RouterStatusEntry? relay = _network.SelectRelay(new[] { "Fast", "Stable" });
             if (relay is null) break;
@@ -139,7 +240,7 @@ internal sealed class HsService
         return intros;
     }
 
-    private async Task<int> PublishAsync(byte[] blindedPub, long tp, int len, string descriptor, CancellationToken ct)
+    private async Task<int> PublishToHsDirsAsync(byte[] blindedPub, long tp, int len, string descriptor, CancellationToken ct)
     {
         (List<RouterStatusEntry> hsdirs, Dictionary<string, byte[]> edById) = await _network.ResolveHsDirsAsync(ct).ConfigureAwait(false);
         byte[] srv = _network.Consensus.SharedRandomCurrentValue

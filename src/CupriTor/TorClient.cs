@@ -22,12 +22,17 @@ public sealed class TorClient : IAsyncDisposable
 {
     private readonly TorClientOptions _options;
     private readonly IRandomSource _random = SecureRandomSource.Instance;
+    private readonly CancellationTokenSource _shutdown = new();
     private TorNetwork? _network;
+    private Task? _refreshLoop;
 
     public TorClient(TorClientOptions? options = null)
     {
         _options = options ?? new TorClientOptions();
     }
+
+    /// <summary>The current verified network view, once bootstrapped (for advanced/service use).</summary>
+    internal TorNetwork? Network => _network;
 
     /// <summary>True once a verified consensus has been loaded and guards are primed.</summary>
     public bool IsBootstrapped => _network is not null;
@@ -41,14 +46,22 @@ public sealed class TorClient : IAsyncDisposable
         if (_options.DirectorySource is null)
             throw new TorBootstrapException("TorClientOptions.DirectorySource must be set before StartAsync.");
 
-        DateTimeOffset now = DateTimeOffset.UtcNow;
+        Consensus consensus = await FetchVerifiedConsensusAsync(_options.DirectorySource, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+        var guards = new EntryGuardManager(_options.StateStore, _random, _options.GuardCount);
+        _network = new TorNetwork(consensus, guards, _options.DirectorySource, _options.Transport, _random, _options.Timeout);
 
-        string consensusText;
-        string keysText;
+        if (_options.AutoRefreshConsensus)
+            _refreshLoop ??= Task.Run(() => RefreshConsensusLoopAsync(_shutdown.Token));
+    }
+
+    /// <summary>Fetch the microdescriptor consensus and authority keys, and verify the consensus against the hard-coded authorities.</summary>
+    private static async Task<Consensus> FetchVerifiedConsensusAsync(IDirectorySource dir, DateTimeOffset now, CancellationToken ct)
+    {
+        string consensusText, keysText;
         try
         {
-            consensusText = await _options.DirectorySource.FetchConsensusAsync(ct).ConfigureAwait(false);
-            keysText = await _options.DirectorySource.FetchAuthorityKeysAsync(ct).ConfigureAwait(false);
+            consensusText = await dir.FetchConsensusAsync(ct).ConfigureAwait(false);
+            keysText = await dir.FetchAuthorityKeysAsync(ct).ConfigureAwait(false);
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
@@ -66,8 +79,44 @@ public sealed class TorClient : IAsyncDisposable
         if (!ConsensusVerifier.Verify(consensus, certs, DirectoryAuthorities.DefaultFingerprints, now, out int validSignatures))
             throw new TorBootstrapException($"Consensus signature verification failed ({validSignatures} valid signatures).");
 
-        var guards = new EntryGuardManager(_options.StateStore, _random, _options.GuardCount);
-        _network = new TorNetwork(consensus, guards, _options.DirectorySource, _options.Transport, _random, _options.Timeout);
+        return consensus;
+    }
+
+    /// <summary>
+    /// Keep the consensus fresh for a long-running client/service: re-fetch + re-verify shortly before the
+    /// current one expires (the consensus is only valid ~3h), and swap it in atomically. Retries with backoff.
+    /// </summary>
+    private async Task RefreshConsensusLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            TorNetwork? network = _network;
+            DateTimeOffset validUntil = network?.Consensus.ValidUntil ?? DateTimeOffset.UtcNow.AddHours(1);
+            // Refresh in the last quarter of the validity window (with a floor/ceiling), matching tor's cadence.
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            TimeSpan wait = validUntil - now - TimeSpan.FromMinutes(45);
+            if (wait < TimeSpan.FromMinutes(5)) wait = TimeSpan.FromMinutes(5);
+            if (wait > TimeSpan.FromHours(2)) wait = TimeSpan.FromHours(2);
+
+            try { await Task.Delay(wait, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+
+            for (int attempt = 0; attempt < 5 && !ct.IsCancellationRequested; attempt++)
+            {
+                try
+                {
+                    Consensus fresh = await FetchVerifiedConsensusAsync(_options.DirectorySource!, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+                    _network?.UpdateConsensus(fresh);
+                    break;
+                }
+                catch (OperationCanceledException) { return; }
+                catch
+                {
+                    try { await Task.Delay(TimeSpan.FromMinutes(2 * (attempt + 1)), ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
+                }
+            }
+        }
     }
 
     /// <summary>Build a circuit of the given length (defaults to <see cref="TorClientOptions.DefaultCircuitLength"/>).</summary>
@@ -127,14 +176,22 @@ public sealed class TorClient : IAsyncDisposable
     /// streams via <paramref name="targetHandler"/> (which returns a local stream for a requested "host:port",
     /// or null to refuse). Returns the .onion address once published; runs until <paramref name="ct"/> is cancelled.
     /// </summary>
-    public async Task<string> PublishOnionAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, int introPoints = 3, CancellationToken ct = default)
+    public async Task<OnionServiceHost> PublishOnionAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, int introPoints = 3, CancellationToken ct = default)
     {
         TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before publishing.");
         var service = new HsService(network, introPoints);
         return await service.StartAsync(identity, targetHandler, ct).ConfigureAwait(false);
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public async ValueTask DisposeAsync()
+    {
+        _shutdown.Cancel();
+        if (_refreshLoop is not null)
+        {
+            try { await _refreshLoop.ConfigureAwait(false); } catch { /* shutdown */ }
+        }
+        _shutdown.Dispose();
+    }
 
     private static IEnumerable<string> SplitCertificates(string text)
     {

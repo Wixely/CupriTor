@@ -31,4 +31,10 @@ public sealed class TorClientOptions
 
     /// <summary>Default number of hops for circuits built without an explicit length.</summary>
     public int DefaultCircuitLength { get; set; } = 3;
+
+    /// <summary>
+    /// Keep the consensus fresh in the background (re-fetch + re-verify before it expires). Required for any
+    /// long-running client or onion service — the consensus is only valid for a few hours. Defaults to true.
+    /// </summary>
+    public bool AutoRefreshConsensus { get; set; } = true;
 }
