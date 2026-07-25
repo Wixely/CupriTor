@@ -120,6 +120,19 @@ public sealed class TorClient : IAsyncDisposable
         return await connector.ConnectAsync(address, port, timeout.Token).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Host a v3 onion service for the given 32-byte Ed25519 identity seed: establish introduction points,
+    /// publish the descriptor, and serve inbound streams via <paramref name="targetHandler"/> (which returns a
+    /// local stream for a requested "host:port", or null to refuse). Returns the .onion address once published;
+    /// the service keeps running until <paramref name="ct"/> is cancelled.
+    /// </summary>
+    public async Task<string> PublishOnionAsync(byte[] identitySeed, Func<string, CancellationToken, Task<Stream?>> targetHandler, int introPoints = 3, CancellationToken ct = default)
+    {
+        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before publishing.");
+        var service = new HsService(network, introPoints);
+        return await service.StartAsync(identitySeed, targetHandler, ct).ConfigureAwait(false);
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private static IEnumerable<string> SplitCertificates(string text)

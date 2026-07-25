@@ -42,6 +42,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     private Task? _receiveLoop;
     private int _nextStreamId;
     private volatile Exception? _fault;
+    private Func<string, CancellationToken, Task<Stream?>>? _incomingHandler; // service side: RELAY_BEGIN → local target
 
     public Circuit(Stream link, CellCodec codec, uint circId)
     {
@@ -211,6 +212,61 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     public Task SendControlAsync(RelayCommand send, byte[] payload, bool early, CancellationToken ct) =>
         SendRelayCellAsync(_hops.Count - 1, send, 0, payload, early, ct);
 
+    /// <summary>
+    /// Service side: register a handler for inbound RELAY_BEGIN. The handler returns a local target stream for
+    /// the requested "host:port" (or null to refuse). The circuit replies RELAY_CONNECTED and bidirectionally
+    /// proxies bytes between the client stream and the target.
+    /// </summary>
+    public void OnIncomingStream(Func<string, CancellationToken, Task<Stream?>> handler) => _incomingHandler = handler;
+
+    private async Task HandleIncomingBeginAsync(RelayCell begin, CancellationToken ct)
+    {
+        if (_incomingHandler is null) return;
+        ushort sid = begin.StreamId;
+        int last = _hops.Count - 1;
+
+        Stream? target = null;
+        try
+        {
+            string request = RelayBeginPayload.TryParse(begin.Data.Span, out RelayBeginPayload payload) ? payload.Target : "";
+            target = await _incomingHandler(request, ct).ConfigureAwait(false);
+        }
+        catch { target = null; }
+
+        if (target is null)
+        {
+            await SendRelayCellAsync(last, RelayCommand.End, sid, new RelayEndPayload(RelayEndReason.ConnectRefused).Encode(), early: false, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var stream = new TorStream(sid, this);
+        _streams[sid] = stream;
+        await SendRelayCellAsync(last, RelayCommand.Connected, sid, new RelayConnectedPayload(null, 0).Encode(), early: false, ct).ConfigureAwait(false);
+        _ = ProxyAsync(stream, target, ct); // pump in the background so the receive loop keeps running
+    }
+
+    private static async Task ProxyAsync(Stream torStream, Stream target, CancellationToken ct)
+    {
+        try
+        {
+            await Task.WhenAny(CopyAsync(torStream, target, ct), CopyAsync(target, torStream, ct)).ConfigureAwait(false);
+        }
+        catch { /* connection ended */ }
+        finally
+        {
+            try { await torStream.DisposeAsync().ConfigureAwait(false); } catch { }
+            try { await target.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
+    }
+
+    private static async Task CopyAsync(Stream from, Stream to, CancellationToken ct)
+    {
+        var buffer = new byte[4096];
+        int n;
+        while ((n = await from.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            await to.WriteAsync(buffer.AsMemory(0, n), ct).ConfigureAwait(false);
+    }
+
     // ---- IRelayStreamController (called by TorStream) ----
 
     public async ValueTask SendDataAsync(ushort streamId, ReadOnlyMemory<byte> data, CancellationToken ct)
@@ -335,6 +391,10 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
                 {
                     fs.OnSendme();
                 }
+                break;
+
+            case RelayCommand.Begin:
+                await HandleIncomingBeginAsync(cell, ct).ConfigureAwait(false); // service side: accept + serve
                 break;
 
             case RelayCommand.Truncated:
