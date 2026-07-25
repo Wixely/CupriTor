@@ -1,0 +1,27 @@
+# systemd unit for the CupriTor host sidecar (Linux).
+# Install:  dotnet tool install --global CupriTor.Host   (or publish to /opt/cupritor-host)
+# Then place this file at /etc/systemd/system/cupritor-host.service, adjust paths, and:
+#   systemctl daemon-reload && systemctl enable --now cupritor-host
+
+[Unit]
+Description=CupriTor onion host sidecar
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# Adjust to your install: either the dotnet tool shim or a published binary.
+ExecStart=/usr/bin/cupritor-host
+WorkingDirectory=/var/lib/cupritor-host
+Environment=CupriTor__Onion__IdentityFile=/var/lib/cupritor-host/onion.key
+# Set the mode + backend here or via /var/lib/cupritor-host/appsettings.json:
+Environment=CupriTor__Mode=TorOnly
+Environment=CupriTor__Backend=127.0.0.1:8080
+Restart=on-failure
+RestartSec=10
+# Hardening (tighten as appropriate for your deployment):
+DynamicUser=yes
+StateDirectory=cupritor-host
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>CupriTor.Host</RootNamespace>
+    <AssemblyName>cupritor-host</AssemblyName>
+    <!-- Uses Microsoft.Extensions.Hosting (reflection-based config binding), so not AOT/trim-clean. -->
+    <IsAotCompatible>false</IsAotCompatible>
+    <!-- Distributed as a cross-platform .NET tool (dotnet tool install) and via Docker. -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>cupritor-host</ToolCommandName>
+    <PackageId>CupriTor.Host</PackageId>
+    <Description>CupriTor.Host — a cross-platform sidecar that exposes any local app over Tor (onion), clearnet, or both, driven by config. Built on the 100% managed CupriTor stack.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CupriTor\CupriTor.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
