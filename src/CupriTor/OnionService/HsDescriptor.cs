@@ -107,7 +107,8 @@ internal static class HsDescriptor
         }
     }
 
-    private static byte[] BuildCert(byte certType, ReadOnlySpan<byte> certifiedKey, ReadOnlySpan<byte> signedWithKey,
+    /// <summary>Build an Ed25519 cert (cert-spec) certifying <paramref name="certifiedKey"/>, signed by <paramref name="signer"/>, with a signed-with-ed25519-key extension.</summary>
+    internal static byte[] BuildCert(byte certType, ReadOnlySpan<byte> certifiedKey, ReadOnlySpan<byte> signedWithKey,
         DateTimeOffset expiration, Ed25519ExpandedKey signer, ReadOnlySpan<byte> signerPublic)
     {
         uint hours = (uint)(expiration - DateTimeOffset.UnixEpoch).TotalHours;

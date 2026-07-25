@@ -1,6 +1,8 @@
+using System.Net;
 using System.Text;
 using CupriCurve;
 using CupriTor.OnionService;
+using CupriTor.Protocol;
 using Xunit;
 
 namespace CupriTor.Tests;
@@ -71,6 +73,53 @@ public class HsDescriptorTests
         byte[] secretInput = HsLayerCrypto.SecretInput(clientBlinded, subcred, view.RevisionCounter);
         Assert.True(HsLayerCrypto.TryDecrypt(view.SuperencryptedBlob.Span, secretInput, HsLayerCrypto.SuperencryptedConstant, out byte[] recovered));
         Assert.Equal(inner, recovered);
+    }
+
+    [Fact]
+    public void Published_Descriptor_RoundTrips_Through_Client_Decrypt_And_IntroParse()
+    {
+        Service svc = MakeService(0x50);
+        byte[] subcred = HsBlinding.Subcredential(svc.IdentityPublic, svc.BlindedPublic);
+
+        var rng = new Random(9);
+        byte[] Rand(int n) { var a = new byte[n]; rng.NextBytes(a); return a; }
+
+        var ips = new List<PublishIntroPoint>();
+        for (int i = 0; i < 2; i++)
+        {
+            byte[] specs = LinkSpecifier.EncodeList(new List<LinkSpecifier>
+            {
+                LinkSpecifier.FromIPv4(IPAddress.Parse($"10.0.0.{i + 1}"), (ushort)(9000 + i)),
+                LinkSpecifier.FromLegacyId(Rand(20)),
+                LinkSpecifier.FromEd25519Id(Rand(32)),
+            });
+            var authKey = Ed25519ExpandedKey.FromSeed(Rand(32));
+            var authPub = new byte[32];
+            authKey.GetPublicKey(authPub);
+            ips.Add(new PublishIntroPoint(specs, Rand(32), authPub, Rand(32)));
+        }
+
+        // Service builds the full descriptor (inner intro-point layer + superencrypted layer + signed outer).
+        string descriptor = HsDescriptorBuilder.Build(svc.BlindedKey, svc.BlindedPublic, subcred, Revision, 180, Now.AddHours(3), ips);
+
+        // Client side: parse, verify the signatures, decrypt BOTH layers, and parse the intro points back.
+        Assert.True(HsDescriptor.TryParse(descriptor, out HsDescriptorView view));
+        var clientBlinded = new byte[32];
+        HsBlinding.TryBlindPublicKey(svc.IdentityPublic, svc.Tp, PeriodLen, clientBlinded);
+        Assert.True(view.TryVerify(clientBlinded, out _));
+
+        byte[] clientSubcred = HsBlinding.Subcredential(svc.IdentityPublic, clientBlinded);
+        byte[] secretInput = HsLayerCrypto.SecretInput(clientBlinded, clientSubcred, view.RevisionCounter);
+        Assert.True(HsLayerCrypto.TryDecrypt(view.SuperencryptedBlob.Span, secretInput, HsLayerCrypto.SuperencryptedConstant, out byte[] superPlain));
+        Assert.True(HsSuperencryptedLayer.TryExtractInner(superPlain, out byte[] innerBlob));
+        Assert.True(HsLayerCrypto.TryDecrypt(innerBlob, secretInput, HsLayerCrypto.EncryptedConstant, out byte[] innerPlain));
+        Assert.True(HsInnerLayer.TryParse(innerPlain, out List<IntroductionPoint> parsed));
+
+        Assert.Equal(2, parsed.Count);
+        Assert.Equal(ips[0].AuthKeyPublic, parsed[0].AuthKey);
+        Assert.Equal(ips[0].EncKeyPublic, parsed[0].EncKey);
+        Assert.Equal(ips[0].IntroRelayNtorKey, parsed[0].OnionKeyNtor);
+        Assert.Equal(ips[1].AuthKeyPublic, parsed[1].AuthKey);
     }
 
     [Fact]

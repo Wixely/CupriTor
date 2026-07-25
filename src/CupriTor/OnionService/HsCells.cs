@@ -97,6 +97,22 @@ internal static class HsCells
         return buffer;
     }
 
+    /// <summary>The legacy fixed RENDEZVOUS1 body size (20 cookie + 128 + 20); the real content is 84 bytes.</summary>
+    public const int LegacyRendezvous1Length = 168;
+
+    /// <summary>
+    /// Service-side RENDEZVOUS1 = cookie ‖ handshake (84 bytes), then RANDOM-padded to the legacy 168-byte size
+    /// (tor always sends payload_len = HS_LEGACY_RENDEZVOUS_CELL_SIZE with the tail filled by crypto_rand).
+    /// </summary>
+    public static byte[] BuildRendezvous1Padded(ReadOnlySpan<byte> cookie, ReadOnlySpan<byte> handshake)
+    {
+        byte[] body = BuildRendezvous1(cookie, handshake);
+        var padded = new byte[LegacyRendezvous1Length];
+        body.CopyTo(padded, 0);
+        RandomNumberGenerator.Fill(padded.AsSpan(body.Length)); // random, not zeros
+        return padded;
+    }
+
     public static bool TryParseRendezvous1(ReadOnlySpan<byte> payload, out byte[] cookie, out byte[] handshake)
     {
         cookie = Array.Empty<byte>();
