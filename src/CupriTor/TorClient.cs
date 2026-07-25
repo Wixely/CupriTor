@@ -18,7 +18,7 @@ public sealed class TorBootstrapException(string message, Exception? inner = nul
 /// verifies the consensus is signed by a majority of the hard-coded authorities before trusting it — so a
 /// malicious directory cache cannot forge the network view. Circuits then run fully managed crypto end to end.
 /// </summary>
-public sealed class TorClient : IAsyncDisposable
+public sealed class TorClient : IAsyncDisposable, ITorDialer
 {
     private readonly TorClientOptions _options;
     private readonly IRandomSource _random = SecureRandomSource.Instance;
@@ -167,6 +167,24 @@ public sealed class TorClient : IAsyncDisposable
 
         var connector = new OnionConnector(network);
         return await connector.ConnectAsync(address, port, timeout.Token).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Dial <paramref name="host"/>:<paramref name="port"/> over Tor and return a duplex <see cref="Stream"/>
+    /// (implements <see cref="ITorDialer"/>). Onion hosts (<c>*.onion</c>) connect via the rendezvous protocol
+    /// (see <see cref="ConnectToOnionAsync"/>). Clearnet hosts need Tor <b>exit</b> support, which this build does
+    /// not include (CupriTor is onion-to-onion) — they throw <see cref="NotSupportedException"/>. The SOCKS5 server
+    /// and the HttpClient integration both dial through here, so enabling exits later lights them up unchanged.
+    /// </summary>
+    public async Task<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(host);
+        if (!host.EndsWith(".onion", StringComparison.OrdinalIgnoreCase))
+            throw new NotSupportedException(
+                $"'{host}:{port}' is a clearnet destination. This CupriTor build routes onion-to-onion only; " +
+                "reaching clearnet hosts through Tor exit relays is not enabled. Pass a .onion address.");
+
+        return await ConnectToOnionAsync(host, port, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
