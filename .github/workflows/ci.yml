@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build, test & pack
+    runs-on: ubuntu-latest
+    permissions:
+      # Read access is needed to restore the CupriCurve package from GitHub Packages.
+      # (Grant this repo access to the CupriCurve package in the org's package settings, or make it public.)
+      packages: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Authenticate GitHub Packages (for CupriCurve)
+        run: >
+          dotnet nuget update source github-wixely
+          --username "${{ github.actor }}"
+          --password "${{ secrets.GITHUB_TOKEN }}"
+          --store-password-in-clear-text
+          --configfile nuget.config
+
+      - name: Restore
+        run: dotnet restore CupriTor.slnx
+
+      - name: Build
+        run: dotnet build CupriTor.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test CupriTor.slnx -c Release --no-build --verbosity normal
+
+      - name: Pack
+        run: |
+          dotnet pack src/CupriTor/CupriTor.csproj -c Release --no-build -o artifacts
+          dotnet pack src/CupriTor.Host/CupriTor.Host.csproj -c Release --no-build -o artifacts
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/*.*nupkg
+          if-no-files-found: error
+
+  release:
+    name: Publish to GitHub Packages
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Authenticate GitHub Packages (for CupriCurve)
+        run: >
+          dotnet nuget update source github-wixely
+          --username "${{ github.actor }}"
+          --password "${{ secrets.GITHUB_TOKEN }}"
+          --store-password-in-clear-text
+          --configfile nuget.config
+
+      - name: Pack
+        run: |
+          dotnet pack src/CupriTor/CupriTor.csproj -c Release -o artifacts
+          dotnet pack src/CupriTor.Host/CupriTor.Host.csproj -c Release -o artifacts
+
+      - name: Push to GitHub Packages
+        run: >
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key "${{ secrets.GITHUB_TOKEN }}"
+          --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          --skip-duplicate
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.*nupkg
+          generate_release_notes: true

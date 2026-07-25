@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/CupriTor/CupriTor.csproj" />
+    <Project Path="src/CupriTor.Host/CupriTor.Host.csproj" />
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/CupriTor.Tests/CupriTor.Tests.csproj" />
