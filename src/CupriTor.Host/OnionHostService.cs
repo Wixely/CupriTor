@@ -8,9 +8,10 @@ using Microsoft.Extensions.Logging;
 namespace CupriTor.Host;
 
 /// <summary>
-/// The sidecar reverse proxy. Depending on <see cref="OnionHostConfig.Mode"/> it opens a clearnet TCP
-/// listener and/or publishes a Tor onion service, and proxies every accepted connection to the configured
-/// backend app. Universal: the backend can be Kestrel, IIS, or anything that speaks over a local port.
+/// The sidecar. Depending on <see cref="OnionHostConfig.Mode"/> it opens a clearnet TCP listener and/or
+/// publishes a Tor onion service, proxying every accepted connection to the configured backend app (Kestrel,
+/// IIS, or anything on a local port). Independently, it can run an outbound SOCKS5 proxy so any app can reach
+/// Tor. All Tor-facing features share one bootstrapped <see cref="TorClient"/>.
 /// </summary>
 public sealed class OnionHostService : BackgroundService
 {
@@ -20,6 +21,7 @@ public sealed class OnionHostService : BackgroundService
     private TorClient? _tor;
     private OnionServiceHost? _onion;
     private TcpListener? _clearnet;
+    private Socks5ProxyServer? _socks;
 
     public OnionHostService(OnionHostConfig config, ILogger<OnionHostService> log)
     {
@@ -30,13 +32,31 @@ public sealed class OnionHostService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         (string backendHost, int backendPort) = _config.BackendEndpoint();
-        _log.LogInformation("CupriTor host starting — mode {Mode}, backend {Host}:{Port}", _config.Mode, backendHost, backendPort);
+        _log.LogInformation("CupriTor host starting — mode {Mode}, backend {Host}:{Port}, socks5 {Socks}",
+            _config.Mode, backendHost, backendPort, _config.Socks5.Enabled ? _config.Socks5.Bind : "off");
+
+        // One shared, verified Tor client for every Tor-facing feature (onion publish and/or SOCKS5).
+        if (_config.NeedsTor)
+        {
+            var options = new TorClientOptions
+            {
+                DirectorySource = _config.DirectorySources.Count > 0
+                    ? new HttpDirectorySource(_config.DirectorySources)
+                    : new HttpDirectorySource(DefaultDirectorySources),
+            };
+            _tor = new TorClient(options);
+            _log.LogInformation("Bootstrapping Tor (verifying consensus)…");
+            await _tor.StartAsync(ct).ConfigureAwait(false);
+        }
 
         if (_config.Mode is BindingMode.ClearnetOnly or BindingMode.Both)
             StartClearnet(backendHost, backendPort, ct);
 
         if (_config.Mode is BindingMode.TorOnly or BindingMode.Both)
             await StartOnionAsync(backendHost, backendPort, ct).ConfigureAwait(false);
+
+        if (_config.Socks5.Enabled)
+            await StartSocks5Async(ct).ConfigureAwait(false);
 
         try { await Task.Delay(Timeout.Infinite, ct).ConfigureAwait(false); }
         catch (OperationCanceledException) { /* shutting down */ }
@@ -65,16 +85,6 @@ public sealed class OnionHostService : BackgroundService
 
     private async Task StartOnionAsync(string backendHost, int backendPort, CancellationToken ct)
     {
-        var options = new TorClientOptions
-        {
-            DirectorySource = _config.DirectorySources.Count > 0
-                ? new HttpDirectorySource(_config.DirectorySources)
-                : new HttpDirectorySource(DefaultDirectorySources),
-        };
-        _tor = new TorClient(options);
-        _log.LogInformation("Bootstrapping Tor (verifying consensus)…");
-        await _tor.StartAsync(ct).ConfigureAwait(false);
-
         OnionServiceKey identity = Identity.Load(_config.Onion, _log);
 
         List<byte[]>? authorized = _config.Onion.AuthorizedClients.Count > 0
@@ -85,8 +95,18 @@ public sealed class OnionHostService : BackgroundService
 
         // Every inbound onion stream is bridged to the backend app (the library's reverse-proxy helper).
         _log.LogInformation("Publishing onion service ({IntroPoints} intro points)…", _config.Onion.IntroPoints);
-        _onion = await _tor.PublishOnionAsync(identity, backendHost, backendPort, _config.Onion.IntroPoints, authorized, ct).ConfigureAwait(false);
+        _onion = await _tor!.PublishOnionAsync(identity, backendHost, backendPort, _config.Onion.IntroPoints, authorized, ct).ConfigureAwait(false);
         _log.LogInformation("Onion front door live: http://{Onion}/ → backend {Host}:{Port}", _onion.OnionAddress, backendHost, backendPort);
+    }
+
+    private async Task StartSocks5Async(CancellationToken ct)
+    {
+        (string host, int port) = _config.Socks5Endpoint();
+        IPAddress addr = host is "0.0.0.0" or "*" ? IPAddress.Any : IPAddress.Parse(host);
+        _socks = new Socks5ProxyServer(_tor!, new Socks5ProxyOptions { Bind = new IPEndPoint(addr, port) },
+            msg => _log.LogDebug("[socks5] {Message}", msg));
+        await _socks.StartAsync(ct).ConfigureAwait(false);
+        _log.LogInformation("SOCKS5 proxy listening on {Bind} → Tor (onion targets; clearnet needs exit support)", $"{host}:{port}");
     }
 
     private async Task ProxyToBackendAsync(Stream inbound, string backendHost, int backendPort, IDisposable disposeClient, CancellationToken ct)
@@ -114,6 +134,7 @@ public sealed class OnionHostService : BackgroundService
     public override async Task StopAsync(CancellationToken ct)
     {
         _clearnet?.Stop();
+        if (_socks is not null) await _socks.DisposeAsync().ConfigureAwait(false);
         if (_onion is not null) await _onion.DisposeAsync().ConfigureAwait(false);
         if (_tor is not null) await _tor.DisposeAsync().ConfigureAwait(false);
         await base.StopAsync(ct).ConfigureAwait(false);

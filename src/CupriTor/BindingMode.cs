@@ -15,4 +15,7 @@ public enum BindingMode
 
     /// <summary>Serve on both the public internet and a Tor onion address simultaneously.</summary>
     Both,
+
+    /// <summary>No reverse-proxy front door (e.g. the sidecar runs only its outbound SOCKS5 proxy).</summary>
+    None,
 }

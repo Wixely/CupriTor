@@ -21,11 +21,18 @@ public sealed class OnionHostConfig
     /// <summary>Onion (Tor) settings, used in Tor/Both modes.</summary>
     public OnionConfig Onion { get; set; } = new();
 
+    /// <summary>Outbound SOCKS5 proxy settings. Independent of <see cref="Mode"/> — enable it to also run a local Tor SOCKS port.</summary>
+    public Socks5Config Socks5 { get; set; } = new();
+
     /// <summary>Directory caches ("ip:dirport") to bootstrap the Tor consensus from. Empty ⇒ built-in authorities.</summary>
     public List<string> DirectorySources { get; set; } = new();
 
     public (string Host, int Port) BackendEndpoint() => Split(Backend, 8080);
     public (string Host, int Port) ClearnetEndpoint() => Split(ClearnetBind, 80);
+    public (string Host, int Port) Socks5Endpoint() => Split(Socks5.Bind, 9050);
+
+    /// <summary>True when Tor must be bootstrapped: any onion front door, or the outbound SOCKS5 proxy.</summary>
+    public bool NeedsTor => Mode is BindingMode.TorOnly or BindingMode.Both || Socks5.Enabled;
 
     private static (string, int) Split(string value, int defaultPort)
     {
@@ -48,6 +55,16 @@ public sealed class OnionConfig
 
     /// <summary>Authorized client public keys (base32 x25519) for a private/authenticated onion. Empty ⇒ public onion.</summary>
     public List<string> AuthorizedClients { get; set; } = new();
+}
+
+/// <summary>Outbound SOCKS5 proxy: a local Tor SOCKS port any app can point at (like a managed <c>tor</c>).</summary>
+public sealed class Socks5Config
+{
+    /// <summary>Run the SOCKS5 proxy. Works with any <see cref="BindingMode"/>, including <see cref="BindingMode.None"/> (SOCKS-only).</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>Address to listen on ("host:port"). Defaults to loopback 127.0.0.1:9050 (Tor's conventional SOCKS port).</summary>
+    public string Bind { get; set; } = "127.0.0.1:9050";
 }
 
 /// <summary>How the onion identity is sourced.</summary>

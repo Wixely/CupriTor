@@ -33,9 +33,26 @@ node, PHP, etc. The app binds to loopback; the sidecar is its front door(s).
 - `ClearnetOnly` — public internet only (Tor off).
 - `TorOnly` — onion only; keep the app on loopback and it's not publicly reachable.
 - `Both` — served on the public internet **and** a `.onion` at the same time, same backend.
+- `None` — no reverse-proxy front door (pair with SOCKS5 below for an outbound-only proxy).
 
 Every source overrides the previous: `appsettings.json` → environment variables (`CupriTor__Mode=TorOnly`) →
 command line (`--CupriTor:Mode=TorOnly`).
+
+## Outbound SOCKS5 proxy
+
+Independently of `Mode`, the sidecar can run a local **SOCKS5** proxy — a managed Tor SOCKS port any app can use:
+
+```jsonc
+"Socks5": { "Enabled": true, "Bind": "127.0.0.1:9050" }
+```
+
+```bash
+curl --socks5-hostname 127.0.0.1:9050 http://xxxxx.onion/     # any SOCKS5-aware app
+```
+
+Onion targets are dialed through the rendezvous protocol; clearnet targets are refused (Tor exit support isn't in
+this build). Run it **alongside** a reverse proxy, or on its own with `"Mode": "None"` for a SOCKS-only service.
+Keep the bind on loopback — anyone who can reach it can use the tunnel.
 
 ## Run
 
