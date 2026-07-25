@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>CupriTor.AspNetCore</RootNamespace>
+    <AssemblyName>CupriTor.AspNetCore</AssemblyName>
+    <!-- The Kestrel transport integration references the ASP.NET Core shared framework, which is not AOT-annotated. -->
+    <IsAotCompatible>false</IsAotCompatible>
+    <PackageId>CupriTor.AspNetCore</PackageId>
+    <Description>Host any ASP.NET Core (Kestrel) app directly on a Tor v3 onion service — no loopback proxy. Onion streams are fed straight to Kestrel as connections, and clearnet + onion bind side by side in one server.</Description>
+    <PackageTags>tor;onion;aspnetcore;kestrel;privacy;managed;hosting</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../CupriTor/CupriTor.csproj" />
+  </ItemGroup>
+
+</Project>

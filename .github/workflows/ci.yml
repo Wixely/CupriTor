@@ -45,6 +45,7 @@ jobs:
       - name: Pack
         run: |
           dotnet pack src/CupriTor/CupriTor.csproj -c Release --no-build -o artifacts
+          dotnet pack src/CupriTor.AspNetCore/CupriTor.AspNetCore.csproj -c Release --no-build -o artifacts
           dotnet pack src/CupriTor.Host/CupriTor.Host.csproj -c Release --no-build -o artifacts
 
       - name: Upload package artifacts
@@ -81,6 +82,7 @@ jobs:
       - name: Pack
         run: |
           dotnet pack src/CupriTor/CupriTor.csproj -c Release -o artifacts
+          dotnet pack src/CupriTor.AspNetCore/CupriTor.AspNetCore.csproj -c Release -o artifacts
           dotnet pack src/CupriTor.Host/CupriTor.Host.csproj -c Release -o artifacts
 
       - name: Push to GitHub Packages

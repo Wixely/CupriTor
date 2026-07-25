@@ -71,6 +71,55 @@ public class CircuitLoopbackTests
         await relayTask.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
+    [Fact]
+    public async Task Service_Circuit_Accepts_Inbound_Begin_And_Handler_Serves_Then_Ends()
+    {
+        // The service-side accept model: an inbound RELAY_BEGIN must yield RELAY_CONNECTED, then the handler
+        // (which now OWNS the accepted stream) serves a response, and disposing the stream sends RELAY_END.
+        (Stream service, Stream peerSide) = InMemoryDuplex.Pair();
+        var peer = new RendezvousPeer(peerSide, 0x80000003);
+        Task handshake = peer.RunHandshakeAsync();
+
+        await using var circuit = new Circuit(service, new CellCodec(4), 0x80000003);
+        await circuit.CreateFirstHopAsync(peer.HopInfo, TestTimeout());
+        await handshake;
+
+        byte[] response = Encoding.ASCII.GetBytes("HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nhi");
+        byte[]? sawRequest = null;
+        circuit.OnIncomingStream(async (stream, target, ct) =>
+        {
+            await using (stream) // handler owns the stream; disposing it sends RELAY_END
+            {
+                var buf = new byte[128];
+                int n = await stream.ReadAsync(buf, ct);
+                sawRequest = buf.AsSpan(0, n).ToArray();
+                await stream.WriteAsync(response, ct);
+            }
+        });
+        circuit.Start();
+
+        await peer.SendBeginAsync(1, "example.com:80");
+        await peer.SendDataAsync(1, Encoding.ASCII.GetBytes("GET / HTTP/1.0\r\n\r\n"));
+
+        RelayCell connected = await peer.NextForwardAsync();
+        Assert.Equal(RelayCommand.Connected, connected.Command);
+        Assert.Equal((ushort)1, connected.StreamId);
+
+        var got = new List<byte>();
+        RelayCell next = await peer.NextForwardAsync();
+        while (next.Command == RelayCommand.Data)
+        {
+            got.AddRange(next.Data.ToArray());
+            next = await peer.NextForwardAsync();
+        }
+        Assert.Equal(RelayCommand.End, next.Command);          // handler disposal closed the stream
+        Assert.Equal((ushort)1, next.StreamId);
+        Assert.Equal(response, got.ToArray());                 // full response reached the peer
+        Assert.Equal("GET / HTTP/1.0\r\n\r\n", Encoding.ASCII.GetString(sawRequest!)); // handler saw the request
+
+        peer.Stop();
+    }
+
     private static async Task<string> ReadExactAsync(Stream s, int count)
     {
         var buf = new byte[count];
@@ -165,6 +214,99 @@ public class CircuitLoopbackTests
             Assert.True(RelayCell.TryParse(body, out RelayCell parsed));
             return parsed;
         }
+
+        private async Task SendBackAsync(RelayCell relayCell)
+        {
+            var cell = new byte[RelayCell.CellLength];
+            relayCell.EncodeTo(cell);
+            byte[] digest = _crypto!.BackwardDigest(cell);
+            digest.CopyTo(cell, RelayCell.DigestOffset);
+            _crypto.CryptBackward(cell);
+            await _codec.WriteAsync(_stream, new Cell(_circId, CellCommand.Relay, cell));
+        }
+
+        private static byte[] RandomBytes(int n)
+        {
+            var b = new byte[n];
+            new SecureRandom().NextBytes(b);
+            return b;
+        }
+    }
+
+    /// <summary>
+    /// The far side of a rendezvous: completes the ntor handshake, then acts as the client the circuit serves —
+    /// it can push inbound RELAY_BEGIN/RELAY_DATA (backward) and records the forward cells the service sends back.
+    /// </summary>
+    private sealed class RendezvousPeer
+    {
+        private readonly Stream _stream;
+        private readonly uint _circId;
+        private readonly CellCodec _codec = new(4);
+        private readonly X25519PrivateKeyParameters _ntorPriv;
+        private readonly byte[] _ntorPub;
+        private readonly byte[] _nodeId = RandomBytes(20);
+        private readonly CancellationTokenSource _cts = new();
+        private readonly Channel<RelayCell> _forward = Channel.CreateUnbounded<RelayCell>();
+        private RelayCrypto? _crypto;
+
+        public RendezvousPeer(Stream stream, uint circId)
+        {
+            _stream = stream;
+            _circId = circId;
+            _ntorPriv = new X25519PrivateKeyParameters(new SecureRandom());
+            _ntorPub = _ntorPriv.GeneratePublicKey().GetEncoded();
+        }
+
+        public RelayHopInfo HopInfo => new(System.Net.IPAddress.Loopback, 9001, _nodeId, _ntorPub, null);
+
+        public void Stop() => _cts.Cancel();
+
+        public async Task RunHandshakeAsync()
+        {
+            Cell create = await _codec.ReadAsync(_stream, _cts.Token);
+            Assert.Equal(CellCommand.Create2, create.Command);
+            Assert.True(Create2Payload.TryParse(create.Payload.Span, out var c2));
+            var responded = Ntor.Respond(c2.Data.ToArray(), _nodeId, _ntorPriv, _ntorPub)
+                ?? throw new InvalidOperationException("ntor Respond failed");
+            _crypto = new RelayCrypto(Ntor.DeriveKeys(responded.KeySeed, RelayCrypto.KeyMaterialLength));
+            await _codec.WriteAsync(_stream, new Cell(_circId, CellCommand.Created2, new Created2Payload(responded.CreatedData).Encode()), _cts.Token);
+            _ = ReadForwardLoopAsync();
+        }
+
+        private async Task ReadForwardLoopAsync()
+        {
+            try
+            {
+                while (!_cts.IsCancellationRequested)
+                {
+                    Cell cell;
+                    try { cell = await _codec.ReadAsync(_stream, _cts.Token); }
+                    catch { break; }
+                    if (cell.Command is not (CellCommand.Relay or CellCommand.RelayEarly)) continue;
+                    byte[] body = cell.Payload.ToArray();
+                    _crypto!.CryptForward(body);
+                    if (RelayCell.TryParse(body, out RelayCell parsed))
+                        _forward.Writer.TryWrite(parsed);
+                }
+            }
+            finally { _forward.Writer.TryComplete(); }
+        }
+
+        public async Task<RelayCell> NextForwardAsync()
+        {
+            using var to = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            return await _forward.Reader.ReadAsync(to.Token);
+        }
+
+        public Task SendBeginAsync(ushort sid, string target)
+        {
+            byte[] t = Encoding.ASCII.GetBytes(target);
+            byte[] payload = new byte[t.Length + 1 + 4]; // ADDRPORT '\0' FLAGS(4)
+            t.CopyTo(payload, 0);
+            return SendBackAsync(new RelayCell(RelayCommand.Begin, sid, payload));
+        }
+
+        public Task SendDataAsync(ushort sid, byte[] data) => SendBackAsync(new RelayCell(RelayCommand.Data, sid, data));
 
         private async Task SendBackAsync(RelayCell relayCell)
         {

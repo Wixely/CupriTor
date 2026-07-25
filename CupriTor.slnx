@@ -1,7 +1,11 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/CupriTor/CupriTor.csproj" />
+    <Project Path="src/CupriTor.AspNetCore/CupriTor.AspNetCore.csproj" />
     <Project Path="src/CupriTor.Host/CupriTor.Host.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/OnionWebApp/OnionWebApp.csproj" />
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/CupriTor.Tests/CupriTor.Tests.csproj" />

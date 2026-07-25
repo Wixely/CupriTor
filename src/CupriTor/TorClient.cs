@@ -172,16 +172,25 @@ public sealed class TorClient : IAsyncDisposable
     /// <summary>
     /// Host a v3 onion service for the given <paramref name="identity"/> (create one with
     /// <see cref="OnionServiceKey.CreateRandom"/>, restore with <see cref="OnionServiceKey.FromTorSecretKey"/>,
-    /// or import a vanity key): establish introduction points, publish the descriptor, and serve inbound
-    /// streams via <paramref name="targetHandler"/> (which returns a local stream for a requested "host:port",
-    /// or null to refuse). Returns the .onion address once published; runs until <paramref name="ct"/> is cancelled.
+    /// or import a vanity key): establish introduction points, publish the descriptor, and hand each inbound stream
+    /// (already RELAY_CONNECTED) to <paramref name="onAccept"/>, which owns it. This is the low-level primitive —
+    /// feed the stream straight to a web server (no loopback) or bridge it wherever you like. Returns the .onion
+    /// address once published; runs until <paramref name="ct"/> is cancelled or the host is disposed.
     /// </summary>
-    public async Task<OnionServiceHost> PublishOnionAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, int introPoints = 3, IReadOnlyList<byte[]>? authorizedClients = null, CancellationToken ct = default)
+    public async Task<OnionServiceHost> PublishOnionAsync(OnionServiceKey identity, OnionStreamHandler onAccept, int introPoints = 3, IReadOnlyList<byte[]>? authorizedClients = null, CancellationToken ct = default)
     {
         TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before publishing.");
         var service = new HsService(network, introPoints, authorizedClients: authorizedClients);
-        return await service.StartAsync(identity, targetHandler, ct).ConfigureAwait(false);
+        return await service.StartAsync(identity, onAccept, ct).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Convenience overload: host <paramref name="identity"/> as a reverse proxy that bridges every inbound onion
+    /// stream to a local TCP backend at <paramref name="backendHost"/>:<paramref name="backendPort"/>. The backend
+    /// app is unaware of Tor. For a no-loopback, in-process integration use CupriTor.AspNetCore instead.
+    /// </summary>
+    public Task<OnionServiceHost> PublishOnionAsync(OnionServiceKey identity, string backendHost, int backendPort, int introPoints = 3, IReadOnlyList<byte[]>? authorizedClients = null, CancellationToken ct = default) =>
+        PublishOnionAsync(identity, OnionReverseProxy.ToTcp(backendHost, backendPort), introPoints, authorizedClients, ct);
 
     public async ValueTask DisposeAsync()
     {

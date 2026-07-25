@@ -33,7 +33,7 @@ internal sealed class HsService
     private byte[] _identityPub = Array.Empty<byte>();
     private int _periodLength = HsTimePeriod.DefaultLengthMinutes;
     private volatile byte[][] _activeSubcredentials = Array.Empty<byte[]>(); // the current + adjacent period subcredentials
-    private Func<string, CancellationToken, Task<Stream?>> _targetHandler = (_, _) => Task.FromResult<Stream?>(null);
+    private OnionStreamHandler _acceptHandler = (stream, _, _) => stream.DisposeAsync().AsTask();
     private CancellationTokenSource? _cts;
     private Task? _supervisor;
     private DateTimeOffset _lastPublish;
@@ -55,14 +55,13 @@ internal sealed class HsService
         OrConnection Connection, Circuit Circuit);
 
     /// <summary>
-    /// Start hosting the onion service for <paramref name="identity"/>. Inbound streams are served by
-    /// <paramref name="targetHandler"/> ("host:port" → local stream, or null to refuse). Returns a durable
-    /// <see cref="OnionServiceHost"/> that keeps the intro points healthy and re-publishes automatically until
-    /// disposed (or <paramref name="ct"/> is cancelled).
+    /// Start hosting the onion service for <paramref name="identity"/>. Each inbound stream (already RELAY_CONNECTED)
+    /// is handed to <paramref name="onAccept"/>, which owns it. Returns a durable <see cref="OnionServiceHost"/> that
+    /// keeps the intro points healthy and re-publishes automatically until disposed (or <paramref name="ct"/> fires).
     /// </summary>
-    public async Task<OnionServiceHost> StartAsync(OnionServiceKey identity, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
+    public async Task<OnionServiceHost> StartAsync(OnionServiceKey identity, OnionStreamHandler onAccept, CancellationToken ct)
     {
-        _targetHandler = targetHandler;
+        _acceptHandler = onAccept;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         CancellationToken token = _cts.Token;
 
@@ -90,7 +89,7 @@ internal sealed class HsService
         return new OnionServiceHost(identity.OnionAddress, this);
     }
 
-    private void StartAcceptLoop(IntroPoint ip, CancellationToken ct) => _ = AcceptLoopAsync(ip, _targetHandler, ct);
+    private void StartAcceptLoop(IntroPoint ip, CancellationToken ct) => _ = AcceptLoopAsync(ip, _acceptHandler, ct);
 
     /// <summary>The two (time period, SRV) pairs a service publishes for right now (rend-spec-v3 §2.2.4).</summary>
     private List<(long Tp, byte[] Srv)> ComputePeriods(Consensus consensus)
@@ -318,7 +317,7 @@ internal sealed class HsService
         }
     }
 
-    private async Task AcceptLoopAsync(IntroPoint ip, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
+    private async Task AcceptLoopAsync(IntroPoint ip, OnionStreamHandler onAccept, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -326,11 +325,11 @@ internal sealed class HsService
             try { cell = await ip.Circuit.WaitForAsync(RelayCommand.Introduce2, ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
             catch (Exception) { break; }
-            _ = HandleIntroduce2Async(ip, cell, targetHandler, ct);
+            _ = HandleIntroduce2Async(ip, cell, onAccept, ct);
         }
     }
 
-    private async Task HandleIntroduce2Async(IntroPoint ip, RelayCell introduce2, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
+    private async Task HandleIntroduce2Async(IntroPoint ip, RelayCell introduce2, OnionStreamHandler onAccept, CancellationToken ct)
     {
         try
         {
@@ -359,7 +358,7 @@ internal sealed class HsService
             await rpCircuit.SendControlAsync(RelayCommand.Rendezvous1, rend1, early: false, ct).ConfigureAwait(false);
 
             rpCircuit.AppendHopReversed(HsNtor.DeriveKeys(rend.Value.NtorKeySeed, RelayCrypto.KeyMaterialLengthV3Hs));
-            rpCircuit.OnIncomingStream(targetHandler); // now accept the client's RELAY_BEGIN
+            rpCircuit.OnIncomingStream(onAccept); // now accept the client's RELAY_BEGIN
             _trace?.Invoke("rendezvous spliced; serving client");
         }
         catch (Exception e) when (e is not OperationCanceledException)

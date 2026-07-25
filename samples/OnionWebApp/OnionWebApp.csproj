@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!-- References the ASP.NET Core shared framework, which is not AOT-annotated. -->
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/CupriTor.AspNetCore/CupriTor.AspNetCore.csproj" />
+  </ItemGroup>
+
+</Project>

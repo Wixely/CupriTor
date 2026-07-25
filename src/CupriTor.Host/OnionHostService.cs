@@ -77,22 +77,15 @@ public sealed class OnionHostService : BackgroundService
 
         OnionServiceKey identity = Identity.Load(_config.Onion, _log);
 
-        // Every inbound onion stream is proxied to the backend app.
-        async Task<Stream?> Handler(string target, CancellationToken c)
-        {
-            var tcp = new TcpClient();
-            try { await tcp.ConnectAsync(backendHost, backendPort, c).ConfigureAwait(false); return tcp.GetStream(); }
-            catch { tcp.Dispose(); return null; }
-        }
-
         List<byte[]>? authorized = _config.Onion.AuthorizedClients.Count > 0
             ? _config.Onion.AuthorizedClients.Select(OnionClientAuthorization.ParsePublicKey).ToList()
             : null;
         if (authorized is not null)
             _log.LogInformation("Private onion: {Count} authorized client(s)", authorized.Count);
 
+        // Every inbound onion stream is bridged to the backend app (the library's reverse-proxy helper).
         _log.LogInformation("Publishing onion service ({IntroPoints} intro points)…", _config.Onion.IntroPoints);
-        _onion = await _tor.PublishOnionAsync(identity, Handler, _config.Onion.IntroPoints, authorized, ct).ConfigureAwait(false);
+        _onion = await _tor.PublishOnionAsync(identity, backendHost, backendPort, _config.Onion.IntroPoints, authorized, ct).ConfigureAwait(false);
         _log.LogInformation("Onion front door live: http://{Onion}/ → backend {Host}:{Port}", _onion.OnionAddress, backendHost, backendPort);
     }
 

@@ -7,6 +7,11 @@ flip one config setting to change how it's reachable, with no change to the app 
 Works with anything that listens on a local port: **Kestrel / ASP.NET Core, IIS (incl. classic ASP.NET)**,
 node, PHP, etc. The app binds to loopback; the sidecar is its front door(s).
 
+> **ASP.NET Core?** If your app is Kestrel-based you can skip the loopback hop entirely and serve the onion
+> **in-process** with [`CupriTor.AspNetCore`](../CupriTor.AspNetCore) (`builder.WebHost.UseCupriTorOnion(...)`) —
+> onion streams feed straight into Kestrel. Use this sidecar for everything else (IIS, non-.NET apps) or when you
+> want the onion decoupled from the app process.
+
 ## The one switch
 
 ```jsonc
