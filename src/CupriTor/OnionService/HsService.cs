@@ -28,11 +28,10 @@ internal sealed class HsService
     // Reactor state (set in StartAsync, used by the supervisor).
     private readonly List<IntroPoint> _intros = new();
     private readonly object _introLock = new();
-    private Ed25519ExpandedKey _blindedKey;
-    private byte[] _blindedPub = Array.Empty<byte>();
-    private byte[] _subcredential = Array.Empty<byte>();
-    private long _timePeriod;
-    private int _periodLength;
+    private Ed25519ExpandedKey _identityKey;
+    private byte[] _identityPub = Array.Empty<byte>();
+    private int _periodLength = HsTimePeriod.DefaultLengthMinutes;
+    private volatile byte[][] _activeSubcredentials = Array.Empty<byte[]>(); // the current + adjacent period subcredentials
     private Func<string, CancellationToken, Task<Stream?>> _targetHandler = (_, _) => Task.FromResult<Stream?>(null);
     private CancellationTokenSource? _cts;
     private Task? _supervisor;
@@ -65,26 +64,14 @@ internal sealed class HsService
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         CancellationToken token = _cts.Token;
 
-        Ed25519ExpandedKey identityKey = identity.ExpandedKey;
-        byte[] identityPub = identity.PublicKey;
+        _identityKey = identity.ExpandedKey;
+        _identityPub = identity.PublicKey;
+        _periodLength = HsTimePeriod.DefaultLengthMinutes;
         _trace?.Invoke($"identity → {identity.OnionAddress}");
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        _periodLength = HsTimePeriod.DefaultLengthMinutes;
-        _timePeriod = HsTimePeriod.Number(now, _periodLength);
 
-        // Per-period blinded key: private (to sign the descriptor) + public (for the ring/subcredential).
-        byte[] factor = HsBlinding.BlindingFactor(identityPub, _timePeriod, _periodLength);
-        var aPrime = new byte[32];
-        var rhPrime = new byte[32];
-        TorBlinding.BlindPrivateKey(identityKey, factor, BlindPersonalization, aPrime, rhPrime);
-        _blindedKey = Ed25519ExpandedKey.FromParts(aPrime, rhPrime);
-        _blindedPub = new byte[32];
-        if (!HsBlinding.TryBlindPublicKey(identityPub, _timePeriod, _periodLength, _blindedPub))
-            throw new InvalidOperationException("Could not derive the blinded public key.");
-        _subcredential = HsBlinding.Subcredential(identityPub, _blindedPub);
-
-        // 1. Establish introduction points.
+        // 1. Establish introduction points (subcredential-independent — shared by both period descriptors).
         List<IntroPoint> intros = await EstablishIntroPointsAsync(now, _introCount, new HashSet<string>(), token).ConfigureAwait(false);
         if (intros.Count == 0) throw new InvalidOperationException("Could not establish any introduction points.");
         lock (_introLock) _intros.AddRange(intros);
@@ -101,9 +88,38 @@ internal sealed class HsService
         return new OnionServiceHost(identity.OnionAddress, this);
     }
 
-    private void StartAcceptLoop(IntroPoint ip, CancellationToken ct) => _ = AcceptLoopAsync(ip, _subcredential, _targetHandler, ct);
+    private void StartAcceptLoop(IntroPoint ip, CancellationToken ct) => _ = AcceptLoopAsync(ip, _targetHandler, ct);
 
-    /// <summary>Build the descriptor from the current intro set and upload it to the responsible HSDirs. Returns the count.</summary>
+    /// <summary>The two (time period, SRV) pairs a service publishes for right now (rend-spec-v3 §2.2.4).</summary>
+    private List<(long Tp, byte[] Srv)> ComputePeriods(Consensus consensus)
+    {
+        long tp = HsTimePeriod.Number(DateTimeOffset.UtcNow, _periodLength);
+        byte[] cur = consensus.SharedRandomCurrentValue
+            ?? throw new InvalidOperationException("Consensus has no current shared-random value.");
+        byte[] prev = consensus.SharedRandomPreviousValue ?? cur;
+
+        return HsTimePeriod.IsBetweenTpAndSrv(consensus.ValidAfter)
+            ? new List<(long, byte[])> { (tp - 1, prev), (tp, cur) }   // afternoon: prev-TP/prev-SRV, cur-TP/cur-SRV
+            : new List<(long, byte[])> { (tp, prev), (tp + 1, cur) };  // morning: cur-TP/prev-SRV, next-TP/cur-SRV
+    }
+
+    /// <summary>Derive the per-period blinded signing key, blinded public key, and subcredential for a time period.</summary>
+    private (Ed25519ExpandedKey Key, byte[] Pub, byte[] Subcred) DerivePeriodKeys(long tp)
+    {
+        byte[] factor = HsBlinding.BlindingFactor(_identityPub, tp, _periodLength);
+        var a = new byte[32];
+        var rh = new byte[32];
+        TorBlinding.BlindPrivateKey(_identityKey, factor, BlindPersonalization, a, rh);
+        var pub = new byte[32];
+        if (!HsBlinding.TryBlindPublicKey(_identityPub, tp, _periodLength, pub))
+            throw new InvalidOperationException("Could not derive the blinded public key.");
+        return (Ed25519ExpandedKey.FromParts(a, rh), pub, HsBlinding.Subcredential(_identityPub, pub));
+    }
+
+    /// <summary>
+    /// Publish BOTH period descriptors (current + adjacent) with the correct SRV pairing, and record their
+    /// subcredentials so INTRODUCE2 from either period can be decrypted. Returns the total HSDir uploads.
+    /// </summary>
     private async Task<int> PublishOnceAsync(CancellationToken ct)
     {
         List<IntroPoint> snapshot;
@@ -111,12 +127,24 @@ internal sealed class HsService
         if (snapshot.Count == 0) return 0;
 
         var publishIps = snapshot.Select(ip => new PublishIntroPoint(ip.LinkSpecifierBlock, ip.IntroRelayNtorKey, ip.AuthKeyPublic, ip.EncKeyPublic)).ToList();
-        long revision = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); // monotonic per blinded key
-        string descriptor = HsDescriptorBuilder.Build(_blindedKey, _blindedPub, _subcredential, revision, 180, DateTimeOffset.UtcNow.AddHours(3), publishIps);
-        int uploaded = await PublishToHsDirsAsync(_blindedPub, _timePeriod, _periodLength, descriptor, ct).ConfigureAwait(false);
+        List<(long Tp, byte[] Srv)> periods = ComputePeriods(_network.Consensus);
+
+        var subcredentials = new List<byte[]>();
+        int total = 0;
+        foreach ((long tp, byte[] srv) in periods)
+        {
+            (Ed25519ExpandedKey blindedKey, byte[] blindedPub, byte[] subcred) = DerivePeriodKeys(tp);
+            subcredentials.Add(subcred);
+            long revision = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); // monotonic per blinded key
+            string descriptor = HsDescriptorBuilder.Build(blindedKey, blindedPub, subcred, revision, 180, DateTimeOffset.UtcNow.AddHours(3), publishIps);
+            int uploaded = await PublishToHsDirsAsync(blindedPub, tp, _periodLength, srv, descriptor, ct).ConfigureAwait(false);
+            total += uploaded;
+            _trace?.Invoke($"published TP {tp}: {uploaded} HSDir(s) ({snapshot.Count} intros)");
+        }
+
+        _activeSubcredentials = subcredentials.ToArray();
         _lastPublish = DateTimeOffset.UtcNow;
-        _trace?.Invoke($"(re)published to {uploaded} HSDir(s) (rev {revision}, {snapshot.Count} intros)");
-        return uploaded;
+        return total;
     }
 
     /// <summary>Supervisor: replace dead intro points and re-publish periodically so the service stays reachable.</summary>
@@ -240,11 +268,9 @@ internal sealed class HsService
         return intros;
     }
 
-    private async Task<int> PublishToHsDirsAsync(byte[] blindedPub, long tp, int len, string descriptor, CancellationToken ct)
+    private async Task<int> PublishToHsDirsAsync(byte[] blindedPub, long tp, int len, byte[] srv, string descriptor, CancellationToken ct)
     {
         (List<RouterStatusEntry> hsdirs, Dictionary<string, byte[]> edById) = await _network.ResolveHsDirsAsync(ct).ConfigureAwait(false);
-        byte[] srv = _network.Consensus.SharedRandomCurrentValue
-            ?? throw new InvalidOperationException("Consensus has no shared-random value for the HSDir ring.");
 
         byte[] EdOf(RouterStatusEntry r) => edById[Convert.ToHexString(r.RsaIdentityDigest)];
         List<RouterStatusEntry> responsible = HsDirRing.Responsible(hsdirs, EdOf, blindedPub, srv, tp, len, HsDirRing.DefaultReplicas, HsDirRing.DefaultSpreadStore);
@@ -290,7 +316,7 @@ internal sealed class HsService
         }
     }
 
-    private async Task AcceptLoopAsync(IntroPoint ip, byte[] subcredential, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
+    private async Task AcceptLoopAsync(IntroPoint ip, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -298,17 +324,22 @@ internal sealed class HsService
             try { cell = await ip.Circuit.WaitForAsync(RelayCommand.Introduce2, ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
             catch (Exception) { break; }
-            _ = HandleIntroduce2Async(ip, subcredential, cell, targetHandler, ct);
+            _ = HandleIntroduce2Async(ip, cell, targetHandler, ct);
         }
     }
 
-    private async Task HandleIntroduce2Async(IntroPoint ip, byte[] subcredential, RelayCell introduce2, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
+    private async Task HandleIntroduce2Async(IntroPoint ip, RelayCell introduce2, Func<string, CancellationToken, Task<Stream?>> targetHandler, CancellationToken ct)
     {
         try
         {
-            if (!HsIntroduce.TryOpen(introduce2.Data.ToArray(), ip.EncKeyPrivate, ip.EncKeyPublic, subcredential, out IntroduceRequest req))
+            // The client used one of our active period descriptors; try each subcredential until one decrypts.
+            byte[] cell = introduce2.Data.ToArray();
+            IntroduceRequest? request = null;
+            foreach (byte[] subcred in _activeSubcredentials)
+                if (HsIntroduce.TryOpen(cell, ip.EncKeyPrivate, ip.EncKeyPublic, subcred, out IntroduceRequest r)) { request = r; break; }
+            if (request is not { } req)
             {
-                _trace?.Invoke("INTRODUCE2 failed to decrypt/verify");
+                _trace?.Invoke("INTRODUCE2 failed to decrypt/verify (no matching subcredential)");
                 return;
             }
             _trace?.Invoke("INTRODUCE2 decrypted; completing hs-ntor rendezvous");

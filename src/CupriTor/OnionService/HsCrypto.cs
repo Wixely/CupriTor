@@ -28,6 +28,20 @@ internal static class HsTimePeriod
         long minutes = number * lengthMinutes + RotationOffsetMinutes;
         return DateTimeOffset.FromUnixTimeSeconds(minutes * 60);
     }
+
+    /// <summary>
+    /// True when the given consensus time is in the second half of the shared-random day — between the
+    /// time-period rotation (12:00 UTC) and the next shared-random publication (00:00 UTC). This is tor's
+    /// <c>hs_in_period_between_tp_and_srv</c>, and it selects the SRV↔TP pairing for descriptor upload
+    /// (rend-spec-v3 §2.2.4): afternoon ⇒ {(prevTP,prevSRV),(curTP,curSRV)}; morning ⇒ {(curTP,prevSRV),(nextTP,curSRV)}.
+    /// </summary>
+    public static bool IsBetweenTpAndSrv(DateTimeOffset consensusValidAfter)
+    {
+        DateTimeOffset va = consensusValidAfter.ToUniversalTime();
+        var srvStart = new DateTimeOffset(va.Year, va.Month, va.Day, 0, 0, 0, TimeSpan.Zero); // 00:00 UTC (SR run start)
+        DateTimeOffset tpStart = srvStart.AddMinutes(RotationOffsetMinutes);                   // 12:00 UTC (TP rotation)
+        return !(va >= srvStart && va < tpStart);
+    }
 }
 
 /// <summary>
