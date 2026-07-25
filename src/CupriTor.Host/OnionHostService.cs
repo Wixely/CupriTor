@@ -106,7 +106,7 @@ public sealed class OnionHostService : BackgroundService
         _socks = new Socks5ProxyServer(_tor!, new Socks5ProxyOptions { Bind = new IPEndPoint(addr, port) },
             msg => _log.LogDebug("[socks5] {Message}", msg));
         await _socks.StartAsync(ct).ConfigureAwait(false);
-        _log.LogInformation("SOCKS5 proxy listening on {Bind} → Tor (onion targets; clearnet needs exit support)", $"{host}:{port}");
+        _log.LogInformation("SOCKS5 proxy listening on {Bind} → Tor (onion + clearnet via exit)", $"{host}:{port}");
     }
 
     private async Task ProxyToBackendAsync(Stream inbound, string backendHost, int backendPort, IDisposable disposeClient, CancellationToken ct)

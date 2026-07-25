@@ -47,12 +47,13 @@ Independently of `Mode`, the sidecar can run a local **SOCKS5** proxy — a mana
 ```
 
 ```bash
-curl --socks5-hostname 127.0.0.1:9050 http://xxxxx.onion/     # any SOCKS5-aware app
+curl --socks5-hostname 127.0.0.1:9050 http://xxxxx.onion/     # onion service
+curl --socks5-hostname 127.0.0.1:9050 https://example.com/    # clearnet, via a Tor exit
 ```
 
-Onion targets are dialed through the rendezvous protocol; clearnet targets are refused (Tor exit support isn't in
-this build). Run it **alongside** a reverse proxy, or on its own with `"Mode": "None"` for a SOCKS-only service.
-Keep the bind on loopback — anyone who can reach it can use the tunnel.
+Onion targets are dialed through the rendezvous protocol; clearnet targets go through a Tor exit relay (the exit
+does the DNS, so use `--socks5-hostname` to avoid a local lookup). Run it **alongside** a reverse proxy, or on its
+own with `"Mode": "None"` for a SOCKS-only service. Keep the bind on loopback — anyone who can reach it can use the tunnel.
 
 ## Run
 

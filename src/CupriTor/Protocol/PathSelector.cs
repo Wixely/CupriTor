@@ -7,8 +7,8 @@ namespace CupriTor.Protocol;
 /// <summary>
 /// Bandwidth-weighted circuit path selection (path-spec) honouring the anonymity constraints: every
 /// relay must be Running and Valid, each hop's required flags must be present (e.g. Guard for the
-/// entry), and no two hops may share a /16 subnet or a relay family. No Exit selection is performed —
-/// CupriNet is onion-to-onion.
+/// entry), and no two hops may share a /16 subnet or a relay family. Exit selection layers on top of
+/// this (see <see cref="TorNetwork"/>), reusing the weighting and /16 helpers exposed here.
 /// </summary>
 internal static class PathSelector
 {
@@ -83,7 +83,7 @@ internal static class PathSelector
         return false;
     }
 
-    private static bool SameSlash16(IPAddress a, IPAddress b)
+    internal static bool SameSlash16(IPAddress a, IPAddress b)
     {
         if (a.AddressFamily != AddressFamily.InterNetwork || b.AddressFamily != AddressFamily.InterNetwork)
             return false;
@@ -101,7 +101,7 @@ internal static class PathSelector
         return false;
     }
 
-    private static RouterStatusEntry PickWeighted(List<RouterStatusEntry> candidates, IRandomSource random)
+    internal static RouterStatusEntry PickWeighted(IReadOnlyList<RouterStatusEntry> candidates, IRandomSource random)
     {
         ulong total = 0;
         foreach (RouterStatusEntry c in candidates) total += Weight(c);

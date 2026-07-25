@@ -53,11 +53,10 @@ public class Socks5ProxyServerTests
     }
 
     [Fact]
-    public async Task Clearnet_Target_Is_Refused_With_Network_Unreachable()
+    public async Task Dialer_NotSupported_Maps_To_Network_Unreachable()
     {
-        // A real TorClient refuses clearnet up front (no bootstrap needed for the refusal).
-        await using var tor = new TorClient();
-        await using var proxy = new Socks5ProxyServer(tor, new Socks5ProxyOptions { Bind = new IPEndPoint(IPAddress.Loopback, 0) });
+        // If a dialer refuses a destination with NotSupportedException, the proxy answers SOCKS "network unreachable".
+        await using var proxy = new Socks5ProxyServer(new RefusingDialer(), new Socks5ProxyOptions { Bind = new IPEndPoint(IPAddress.Loopback, 0) });
         await proxy.StartAsync();
 
         using var socks = new TcpClient();
@@ -68,13 +67,19 @@ public class Socks5ProxyServerTests
         var method = new byte[2];
         await s.ReadExactlyAsync(method);
 
-        // CONNECT 93.184.216.34:80 (IPv4 literal → clearnet).
+        // CONNECT 93.184.216.34:80 (IPv4 literal).
         await s.WriteAsync(new byte[] { 0x05, 0x01, 0x00, 0x01, 93, 184, 216, 34, 0x00, 80 });
         var reply = new byte[10];
         await s.ReadExactlyAsync(reply);
 
         Assert.Equal(0x05, reply[0]);
-        Assert.Equal(0x03, reply[1]); // network unreachable — clearnet/exit not enabled in this build
+        Assert.Equal(0x03, reply[1]); // network unreachable
+    }
+
+    private sealed class RefusingDialer : ITorDialer
+    {
+        public Task<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default) =>
+            Task.FromException<Stream>(new NotSupportedException("destination refused"));
     }
 
     private static async Task ServeOneAsync(TcpListener listener, string body)

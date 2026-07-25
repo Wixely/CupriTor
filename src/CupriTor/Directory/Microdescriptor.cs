@@ -13,6 +13,9 @@ internal sealed class Microdescriptor
     public byte[] NtorOnionKey { get; private init; } = Array.Empty<byte>();
     public byte[]? Ed25519Identity { get; private init; }
 
+    /// <summary>The relay's IPv4 exit-policy summary (the "p" line). Rejects everything when the line is absent.</summary>
+    public ExitPolicySummary ExitPolicyIPv4 { get; private init; } = ExitPolicySummary.RejectAll;
+
     /// <summary>SHA-256 of the microdescriptor's exact bytes — the digest a consensus "m" line references.</summary>
     public static byte[] ComputeDigest(ReadOnlySpan<byte> microdescriptorBytes) => SHA256.HashData(microdescriptorBytes);
 
@@ -26,6 +29,7 @@ internal sealed class Microdescriptor
             byte[]? rsaOnion = null;
             byte[]? ntor = null;
             byte[]? ed = null;
+            ExitPolicySummary policy = ExitPolicySummary.RejectAll;
 
             foreach (DirectoryItem item in items)
             {
@@ -42,6 +46,10 @@ internal sealed class Microdescriptor
                         if (item.Arguments.Length >= 2 && item.Arguments[0] == "ed25519")
                             ed = DirectoryReader.Base64(item.Arguments[1]);
                         break;
+                    case "p": // IPv4 exit-policy summary
+                        if (item.Arguments.Length >= 2)
+                            policy = ExitPolicySummary.Parse(item.Arguments[0], item.Arguments[1]);
+                        break;
                 }
             }
 
@@ -53,6 +61,7 @@ internal sealed class Microdescriptor
                 RsaOnionKeyDer = rsaOnion,
                 NtorOnionKey = ntor,
                 Ed25519Identity = ed,
+                ExitPolicyIPv4 = policy,
             };
             return true;
         }

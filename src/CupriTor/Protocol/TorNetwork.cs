@@ -62,6 +62,61 @@ internal sealed class TorNetwork
         return BuildOverPathAsync(guard, path, now, ct);
     }
 
+    /// <summary>
+    /// Build an exit circuit (entry guard + <paramref name="middleCount"/> middles + an exit relay) whose exit
+    /// permits <paramref name="port"/>. Exit candidates are Exit-flagged, Fast, Running, Valid and not BadExit,
+    /// kept distinct (relay + /16) from the earlier hops; each candidate's microdescriptor exit-policy summary is
+    /// checked against the port before it is chosen (the summary lives only in the microdescriptor, not the consensus).
+    /// </summary>
+    public async Task<(OrConnection Connection, Circuit Circuit)> BuildExitCircuitAsync(int port, int middleCount, DateTimeOffset now, CancellationToken ct)
+    {
+        const int maxExitProbes = 8;
+
+        // Entry guard + middles first, so the exit can be policy-checked and kept distinct from them.
+        var selection = Guards.SelectGuard(Consensus.Routers, now)
+            ?? throw new InvalidOperationException("No usable entry guard is available from the current consensus.");
+        var perHop = new List<IReadOnlyCollection<string>>();
+        for (int i = 0; i < middleCount; i++) perHop.Add(new[] { "Fast" });
+        if (!PathSelector.TryExtendPath(Consensus.Routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] guardAndMiddles))
+            throw new InvalidOperationException("Could not select a guard + middle path from the consensus.");
+
+        var candidates = Consensus.Routers.Where(r =>
+            r.Flags.Contains("Exit") && !r.Flags.Contains("BadExit") &&
+            r.Flags.Contains("Fast") && r.Flags.Contains("Running") && r.Flags.Contains("Valid") &&
+            r.MicrodescriptorSha256 is not null &&
+            !guardAndMiddles.Contains(r) && !SharesSubnet(r, guardAndMiddles)).ToList();
+        if (candidates.Count == 0)
+            throw new InvalidOperationException("No exit relays are available in the current consensus.");
+
+        Exception? last = null;
+        for (int probe = 0; probe < maxExitProbes && candidates.Count > 0; probe++)
+        {
+            RouterStatusEntry exit = PathSelector.PickWeighted(candidates, _random);
+            candidates.Remove(exit);
+
+            Microdescriptor md;
+            try { md = await ResolveMicrodescriptorAsync(exit, ct).ConfigureAwait(false); }
+            catch (Exception e) when (e is not OperationCanceledException) { last = e; continue; }
+
+            if (!md.ExitPolicyIPv4.Allows(port)) continue;
+
+            var path = new RouterStatusEntry[guardAndMiddles.Length + 1];
+            guardAndMiddles.CopyTo(path, 0);
+            path[^1] = exit;
+            return await BuildOverPathAsync(selection.Guard, path, now, ct).ConfigureAwait(false);
+        }
+
+        throw new InvalidOperationException(
+            $"No exit relay permitting port {port} was found after probing up to {maxExitProbes} candidates.", last);
+    }
+
+    private static bool SharesSubnet(RouterStatusEntry r, IReadOnlyList<RouterStatusEntry> others)
+    {
+        foreach (RouterStatusEntry o in others)
+            if (PathSelector.SameSlash16(r.Address, o.Address)) return true;
+        return false;
+    }
+
     /// <summary>Select the entry guard (hop 0), <paramref name="middleCount"/> random middles, and an optional forced final hop.</summary>
     private (GuardEntry Guard, RouterStatusEntry[] Path) SelectPath(int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now)
     {

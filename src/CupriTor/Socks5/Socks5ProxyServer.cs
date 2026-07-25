@@ -10,9 +10,9 @@ namespace CupriTor;
 /// Point any SOCKS5-aware app at it — <c>curl --socks5-hostname 127.0.0.1:9050</c>, a browser, an SSH
 /// <c>ProxyCommand</c>, a bot framework — and its traffic rides CupriTor with no code changes.
 /// <para>
-/// Onion hostnames are dialed through the rendezvous protocol. Clearnet destinations require Tor exit support
-/// (not in this build) and are refused with a "network unreachable" reply — enabling exits later behind the same
-/// <see cref="ITorDialer"/> lights them up unchanged. NO-AUTH and CONNECT only; loopback-bound by default.
+/// Onion hostnames are dialed through the rendezvous protocol; clearnet destinations go through a Tor exit relay.
+/// (A dialer that declines a destination with <see cref="NotSupportedException"/> is answered "network
+/// unreachable".) NO-AUTH and CONNECT only; loopback-bound by default.
 /// </para>
 /// </summary>
 public sealed class Socks5ProxyServer : IAsyncDisposable
@@ -90,7 +90,7 @@ public sealed class Socks5ProxyServer : IAsyncDisposable
                 }
                 catch (NotSupportedException)
                 {
-                    _trace?.Invoke($"refused clearnet target {host}:{port} (exit not enabled)");
+                    _trace?.Invoke($"dialer declined {host}:{port}");
                     await ReplyAsync(stream, Socks5Reply.NetworkUnreachable, ct).ConfigureAwait(false);
                     return;
                 }

@@ -9,13 +9,13 @@ namespace CupriTor.Tests;
 public class TorHttpClientTests
 {
     [Fact]
-    public async Task Dialer_Rejects_Clearnet_Targets_Until_Exit_Support_Exists()
+    public async Task Clearnet_Targets_Route_To_The_Exit_Path()
     {
         await using var client = new TorClient();
-        // Onion-to-onion build: clearnet is refused up front (before any bootstrap is even needed).
-        NotSupportedException ex = await Assert.ThrowsAsync<NotSupportedException>(
+        // Clearnet is no longer refused outright — it routes to the exit path, which needs a bootstrapped network.
+        InvalidOperationException ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => client.ConnectAsync("example.com", 443));
-        Assert.Contains("clearnet", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("StartAsync", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -172,20 +172,64 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// <summary>
     /// Dial <paramref name="host"/>:<paramref name="port"/> over Tor and return a duplex <see cref="Stream"/>
     /// (implements <see cref="ITorDialer"/>). Onion hosts (<c>*.onion</c>) connect via the rendezvous protocol
-    /// (see <see cref="ConnectToOnionAsync"/>). Clearnet hosts need Tor <b>exit</b> support, which this build does
-    /// not include (CupriTor is onion-to-onion) — they throw <see cref="NotSupportedException"/>. The SOCKS5 server
-    /// and the HttpClient integration both dial through here, so enabling exits later lights them up unchanged.
+    /// (see <see cref="ConnectToOnionAsync"/>); any other host connects to the clearnet through a Tor exit relay
+    /// (see <see cref="ConnectViaExitAsync"/>). The SOCKS5 server and the HttpClient integration both dial through
+    /// here, so both reach onion and clearnet destinations alike.
     /// </summary>
     public async Task<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(host);
-        if (!host.EndsWith(".onion", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException(
-                $"'{host}:{port}' is a clearnet destination. This CupriTor build routes onion-to-onion only; " +
-                "reaching clearnet hosts through Tor exit relays is not enabled. Pass a .onion address.");
-
-        return await ConnectToOnionAsync(host, port, cancellationToken).ConfigureAwait(false);
+        return host.EndsWith(".onion", StringComparison.OrdinalIgnoreCase)
+            ? await ConnectToOnionAsync(host, port, cancellationToken).ConfigureAwait(false)
+            : await ConnectViaExitAsync(host, port, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Connect to a clearnet <paramref name="host"/>:<paramref name="port"/> through a Tor exit relay and return a
+    /// duplex <see cref="Stream"/>. Builds a 3-hop circuit whose exit permits the port, then RELAY_BEGINs to the
+    /// target — the exit performs the DNS resolution, so no local lookup leaks. Retries on a fresh exit if one
+    /// refuses the address (exit policy / resolve failure). Disposing the stream tears the circuit down.
+    /// </summary>
+    public async Task<Stream> ConnectViaExitAsync(string host, int port, CancellationToken ct = default)
+    {
+        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before connecting.");
+        const int maxAttempts = 3;
+        Exception? last = null;
+
+        for (int attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(_options.Timeout);
+
+            OrConnection conn;
+            Circuit circuit;
+            try { (conn, circuit) = await network.BuildExitCircuitAsync(port, middleCount: 1, DateTimeOffset.UtcNow, timeout.Token).ConfigureAwait(false); }
+            catch (Exception e) when (e is not OperationCanceledException) { last = e; continue; }
+
+            try
+            {
+                TorStream stream = await circuit.ConnectAsync($"{host}:{port}", RelayBeginFlags.IPv6Okay, timeout.Token).ConfigureAwait(false);
+                return new CircuitOwningStream(stream, circuit, conn);
+            }
+            catch (StreamRejectedException e) when (IsRetryableExitFailure(e.Reason))
+            {
+                last = e;
+                await conn.DisposeAsync().ConfigureAwait(false); // the address is unreachable via this exit — try another
+            }
+            catch
+            {
+                await conn.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        throw new IOException($"Could not connect to {host}:{port} via a Tor exit after {maxAttempts} attempts.", last);
+    }
+
+    // Exit-side failures worth retrying on a different exit; target-side ones (connection refused/reset) are not.
+    private static bool IsRetryableExitFailure(RelayEndReason? reason) => reason is
+        RelayEndReason.ExitPolicy or RelayEndReason.ResolveFailed or RelayEndReason.Misc or RelayEndReason.Internal or
+        RelayEndReason.NoRoute or RelayEndReason.Timeout or RelayEndReason.ResourceLimit or RelayEndReason.Hibernating;
 
     /// <summary>
     /// Host a v3 onion service for the given <paramref name="identity"/> (create one with

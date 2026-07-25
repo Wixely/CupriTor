@@ -6,6 +6,12 @@ namespace CupriTor.Protocol;
 /// <summary>Raised when a circuit operation fails (DESTROY, TRUNCATED, unrecognized cell, digest mismatch).</summary>
 internal sealed class CircuitException(string message) : Exception(message);
 
+/// <summary>A stream open (RELAY_BEGIN) was refused with a RELAY_END; carries the reason for retry decisions.</summary>
+internal sealed class StreamRejectedException(string message, RelayEndReason? reason) : Exception(message)
+{
+    public RelayEndReason? Reason { get; } = reason;
+}
+
 /// <summary>Everything a circuit needs to add a relay as a hop: its address, ntor key, and identities.</summary>
 internal sealed record RelayHopInfo(IPAddress Address, ushort OrPort, byte[] RsaIdentityDigest, byte[] NtorOnionKey, byte[]? Ed25519Identity);
 
@@ -168,6 +174,10 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     public Task<TorStream> ConnectAsync(string target, CancellationToken ct = default) =>
         OpenStreamAsync(RelayCommand.Begin, new RelayBeginPayload(target).Encode(), ct);
 
+    /// <summary>Open a stream to <paramref name="target"/> with explicit RELAY_BEGIN flags (e.g. IPv6-OK for an exit).</summary>
+    public Task<TorStream> ConnectAsync(string target, RelayBeginFlags flags, CancellationToken ct = default) =>
+        OpenStreamAsync(RelayCommand.Begin, new RelayBeginPayload(target, flags).Encode(), ct);
+
     private async Task<TorStream> OpenStreamAsync(RelayCommand begin, byte[] payload, CancellationToken ct)
     {
         ThrowIfFaulted();
@@ -189,7 +199,10 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         if (reply.Command != RelayCommand.Connected)
         {
             _streams.TryRemove(sid, out _);
-            throw new CircuitException($"Stream not accepted (got {reply.Command}).");
+            RelayEndReason? reason = reply.Command == RelayCommand.End && RelayEndPayload.TryParse(reply.Data.Span, out RelayEndPayload end)
+                ? end.Reason : null;
+            string detail = reason is not null ? $"RELAY_END reason {reason}" : $"got {reply.Command}";
+            throw new StreamRejectedException($"Stream not accepted ({detail}).", reason);
         }
         return stream;
     }
