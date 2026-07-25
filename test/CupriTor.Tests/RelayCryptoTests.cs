@@ -1,10 +1,35 @@
 using CupriTor.Protocol;
+using Org.BouncyCastle.Crypto.Digests;
 using Xunit;
 
 namespace CupriTor.Tests;
 
 public class RelayCryptoTests
 {
+    [Fact]
+    public void V3Hs_ForwardDigest_Matches_Independent_Sha3_256()
+    {
+        var material = new byte[RelayCrypto.KeyMaterialLengthV3Hs];
+        for (int i = 0; i < material.Length; i++) material[i] = (byte)(i + 1);
+        byte[] df = material[..32];
+
+        RelayCrypto crypto = RelayCrypto.CreateV3Hs(material);
+
+        var cell = new byte[RelayCell.CellLength];
+        new RelayCell(RelayCommand.Data, 3, new byte[] { 9, 8, 7 }).EncodeTo(cell); // digest field already zero
+        byte[] got = crypto.ForwardDigest(cell);
+
+        // Independent reference: SHA3-256(Df ‖ cell), first 4 bytes (what tor computes for the v3 relay digest).
+        var sha3 = new Sha3Digest(256);
+        sha3.BlockUpdate(df, 0, df.Length);
+        sha3.BlockUpdate(cell, 0, cell.Length);
+        var full = new byte[32];
+        sha3.DoFinal(full, 0);
+
+        Assert.Equal(full[..4], got);
+    }
+
+
     private const int CellLen = 509;
     private const int RecognizedOffset = 1;
     private const int DigestOffset = 5;
