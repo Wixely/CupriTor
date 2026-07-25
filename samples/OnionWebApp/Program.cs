@@ -2,10 +2,16 @@ using CupriTor;
 using CupriTor.AspNetCore;
 
 // A minimal ASP.NET Core app served DIRECTLY on a Tor v3 onion service — no loopback proxy. The same Kestrel
-// server and middleware pipeline also serve clearnet (whatever ASPNETCORE_URLS / --urls specifies), so this is a
-// dual-bound app: reachable on http://localhost:5000 AND http://<address>.onion at the same time.
+// server and middleware pipeline ALSO serve clearnet on loopback, so this is a dual-bound app: reachable on
+// http://localhost:5000 AND http://<address>.onion at the same time.
+//
+// Note: UseCupriTorOnion adds the onion via Kestrel's Listen() API, which overrides ASPNETCORE_URLS / UseUrls.
+// Multiple Listen() calls are additive, so configure clearnet with Kestrel Listen* too (below) to bind both.
+// (Drop the ConfigureKestrel line and it becomes onion-only; swap ListenLocalhost → ListenAnyIP for public clearnet.)
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.WebHost.ConfigureKestrel(k => k.ListenLocalhost(5000)); // clearnet front door on loopback
 
 // Persist the identity so the .onion address is stable across restarts. Delete the file for a fresh address; drop
 // in a tor `hs_ed25519_secret_key` (or a pre-generated vanity key) to adopt an existing one.
@@ -34,5 +40,6 @@ app.MapGet("/whoami", (HttpContext ctx) => new
     protocol = ctx.Request.Protocol,
 });
 
-Console.WriteLine($"Onion address: {identity.OnionAddress}");
+Console.WriteLine($"Clearnet:  http://localhost:5000/");
+Console.WriteLine($"Onion:     http://{identity.OnionAddress}/");
 app.Run();

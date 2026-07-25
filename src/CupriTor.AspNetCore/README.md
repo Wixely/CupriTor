@@ -38,9 +38,21 @@ app.MapGet("/", () => $"Hello from {identity.OnionAddress} — served in-process
 app.Run();
 ```
 
-- **Dual-bind (clearnet + onion):** just keep your normal clearnet config (`ASPNETCORE_URLS`, `--urls`,
-  `UseUrls`, Kestrel `Listen`). The onion is additive — both serve the same pipeline at once.
-- **Onion only:** configure no clearnet URLs.
+### Loopback / clearnet alongside the onion (dual-bind)
+
+`UseCupriTorOnion` adds the onion via Kestrel's `Listen()` API, and **`Listen()` overrides `ASPNETCORE_URLS` /
+`UseUrls`** (they're ignored once any endpoint is configured in code). Multiple `Listen()` calls *are* additive,
+so configure clearnet with Kestrel `Listen*` too and both bind on the same pipeline:
+
+```csharp
+builder.WebHost.ConfigureKestrel(k => k.ListenLocalhost(5000)); // loopback clearnet (use ListenAnyIP for public)
+builder.WebHost.UseCupriTorOnion(o => o.Identity = identity);   // + onion, no loopback proxy
+// → reachable on http://localhost:5000 AND http://<address>.onion at once
+```
+
+- **Onion only:** just call `UseCupriTorOnion` and add no clearnet `Listen*` — the onion endpoint overrides the
+  default hosting URLs, so nothing binds on clearnet.
+- **Clearnet only:** don't call `UseCupriTorOnion` (or gate it behind config) — plain Kestrel.
 
 ## Private onions (client authorization)
 
