@@ -108,10 +108,11 @@ public class RelayCryptoTests
     }
 
     [Fact]
-    public void V3Hs_RoundTrips_With_Sha3_Digests_And_96Byte_Keys()
+    public void V3Hs_RoundTrips_With_Sha3_Digests_And_128Byte_Aes256_Keys()
     {
+        Assert.Equal(128, RelayCrypto.KeyMaterialLengthV3Hs); // Df32|Db32|Kf32|Kb32 — AES-256, tor RELAY_CRYPTO_ALG_TOR1_HSC
         var rng = new Random(23);
-        // Client and service share the same 96-byte rendezvous key material (Df32|Db32|Kf16|Kb16).
+        // Client and service share the same 128-byte rendezvous key material (Df32|Db32|Kf32|Kb32, AES-256).
         var km = new byte[RelayCrypto.KeyMaterialLengthV3Hs];
         rng.NextBytes(km);
         RelayCrypto client = RelayCrypto.CreateV3Hs(km);

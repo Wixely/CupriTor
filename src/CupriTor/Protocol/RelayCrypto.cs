@@ -46,33 +46,32 @@ internal sealed class AesCtrKeystream
 }
 
 /// <summary>
-/// Per-hop relay-cell cryptography (tor-spec §5.5): forward/backward AES-128-CTR layers and the running
+/// Per-hop relay-cell cryptography (tor-spec §5.5): forward/backward AES-CTR layers and the running
 /// integrity digests seeded by Df/Db. Two modes: the legacy ntor hop (72-byte material Df20‖Db20‖Kf16‖Kb16,
-/// SHA-1 running digests) used for normal circuit hops, and the v3 onion-service rendezvous hop (96-byte
-/// material Df32‖Db32‖Kf16‖Kb16, SHA3-256 running digests, rend-spec-v3 §4.2). The client holds one
-/// instance per hop; a relay/onion-service holds one per circuit.
+/// SHA-1 running digests, AES-128) used for normal circuit hops, and the v3 onion-service rendezvous hop
+/// (128-byte material Df32‖Db32‖Kf32‖Kb32, SHA3-256 running digests, AES-256 — tor's
+/// RELAY_CRYPTO_ALG_TOR1_HSC/HSS). The client holds one instance per hop; a relay/onion-service holds one per circuit.
 /// </summary>
 internal sealed class RelayCrypto
 {
-    public const int KeyMaterialLength = 20 + 20 + 16 + 16;      // legacy ntor: SHA-1 digests
-    public const int KeyMaterialLengthV3Hs = 32 + 32 + 16 + 16;  // v3 HS rendezvous: SHA3-256 digests
+    public const int KeyMaterialLength = 20 + 20 + 16 + 16;      // legacy ntor: SHA-1 digests, AES-128
+    public const int KeyMaterialLengthV3Hs = 32 + 32 + 32 + 32;  // v3 HS rendezvous: SHA3-256 digests, AES-256
 
     private readonly AesCtrKeystream _forward;
     private readonly AesCtrKeystream _backward;
     private readonly IDigest _forwardDigest;
     private readonly IDigest _backwardDigest;
 
-    /// <summary>Legacy ntor circuit hop (SHA-1 running digests, 72-byte key material).</summary>
+    /// <summary>Legacy ntor circuit hop (SHA-1 running digests, AES-128, 72-byte key material).</summary>
     public RelayCrypto(ReadOnlySpan<byte> keyMaterial)
-        : this(keyMaterial, digestSeedLength: 20, useSha3: false) { }
+        : this(keyMaterial, digestSeedLength: 20, keyLength: 16, useSha3: false) { }
 
-    /// <summary>v3 onion-service rendezvous hop (SHA3-256 running digests, 96-byte key material).</summary>
+    /// <summary>v3 onion-service rendezvous hop (SHA3-256 running digests, AES-256, 128-byte key material).</summary>
     public static RelayCrypto CreateV3Hs(ReadOnlySpan<byte> keyMaterial) =>
-        new(keyMaterial, digestSeedLength: 32, useSha3: true);
+        new(keyMaterial, digestSeedLength: 32, keyLength: 32, useSha3: true);
 
-    private RelayCrypto(ReadOnlySpan<byte> keyMaterial, int digestSeedLength, bool useSha3)
+    private RelayCrypto(ReadOnlySpan<byte> keyMaterial, int digestSeedLength, int keyLength, bool useSha3)
     {
-        const int keyLength = 16; // AES-128 in both modes
         int need = digestSeedLength * 2 + keyLength * 2;
         if (keyMaterial.Length < need)
             throw new ArgumentException($"Need {need} bytes of key material.", nameof(keyMaterial));
@@ -80,7 +79,7 @@ internal sealed class RelayCrypto
         byte[] df = keyMaterial[..digestSeedLength].ToArray();
         byte[] db = keyMaterial[digestSeedLength..(2 * digestSeedLength)].ToArray();
         int k = 2 * digestSeedLength;
-        _forward = new AesCtrKeystream(keyMaterial[k..(k + keyLength)].ToArray());
+        _forward = new AesCtrKeystream(keyMaterial[k..(k + keyLength)].ToArray());       // AES-128 or AES-256 by key length
         _backward = new AesCtrKeystream(keyMaterial[(k + keyLength)..(k + 2 * keyLength)].ToArray());
 
         _forwardDigest = useSha3 ? new Sha3Digest(256) : new Sha1Digest();

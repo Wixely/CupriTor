@@ -59,15 +59,12 @@ internal sealed class OnionConnector
             // 5. Complete the rendezvous handshake and splice the service's onion layer onto the circuit.
             RelayCell reply = await rendezvous2.ConfigureAwait(false);
             _trace?.Invoke($"RENDEZVOUS2 received ({reply.Data.Length} bytes)");
-            _trace?.Invoke($"RENDEZVOUS2 hex: {Convert.ToHexString(reply.Data.Span)}");
             if (!HsCells.TryParseRendezvousHandshake(reply.Data.Span, out byte[] servicePublic, out byte[] auth))
                 throw new InvalidOperationException("Malformed RENDEZVOUS2 handshake.");
             byte[]? keySeed = HsNtor.ClientRendezvous(hs, servicePublic, auth)
                 ?? throw new InvalidOperationException("Rendezvous hs-ntor AUTH verification failed.");
             _trace?.Invoke("rendezvous AUTH verified; splicing service hop");
-            byte[] rendKeys = HsNtor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLengthV3Hs);
-            _trace?.Invoke($"rend key material ({rendKeys.Length}B): {Convert.ToHexString(rendKeys)}");
-            rendCircuit.AppendHop(rendKeys);
+            rendCircuit.AppendHop(HsNtor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLengthV3Hs));
 
             // 6. Open the application stream to the service. For a hidden service the RELAY_BEGIN address
             //    is empty (just ":port") — the service knows its own identity; a non-empty host is rejected.
