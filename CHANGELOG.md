@@ -41,6 +41,5 @@ First feature-complete release: a 100%-managed Tor client, v3 onion service, exi
   Ed25519 signing / key blinding via [CupriCurve](https://github.com/Wixely/CupriCurve).
 
 ### Known limitations
-- Not independently audited; pre-1.0. Managed (BouncyCastle) TLS is not yet live-validated (the OS `SslStream`
-  baseline is). No relay/node support, IPv6 exit, `RELAY_RESOLVE`, or traffic-analysis padding yet — see the
-  [roadmap](ROADMAP.md).
+- Not independently audited; pre-1.0. No relay/node support, IPv6 exit, `RELAY_RESOLVE`, or traffic-analysis
+  padding yet — see the [roadmap](ROADMAP.md).

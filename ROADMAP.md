@@ -86,10 +86,11 @@ proxy). Family-distinctness doc corrected to not over-promise.
 - 💤 **Stream isolation** — per-destination / per-credential circuit isolation (our SOCKS is NO-AUTH today; note we
   currently build a fresh circuit per connection, which over-isolates but is unusual + slow).
 - 💤 **Threat-model / SECURITY doc** — see requested #4.
-- 💤 **OPE revision counter**, **INTRODUCE2 replay cache**, **intro-point rotation policy** (onion-service hardening).
+- ✅ **Managed-TLS live-validated** (2026-07-26) — `BouncyCastleTlsTransport` (the library default) built a live 3-hop
+  circuit + onion connect + exit connect via the collector's `--managed-tls`. The "100% managed on the critical path"
+  claim is confirmed against real relays; `new TorClient()` is release-ready as-is.
+- 💤 **OPE revision counter** and **intro-point rotation policy** (onion-service hardening). *(INTRODUCE2 replay cache: done.)*
 - 💤 **Congestion control** (prop324 / Vegas) — legacy fixed flow-control windows today.
-- 💤 **Managed-TLS live test** — `BouncyCastleTlsTransport` has never been exercised live (live runs used OS SslStream);
-  a `--managed-tls` toggle to validate the 100%-managed path.
 - 💤 **RSA cross-cert (type 2/7) anchoring**; **guard prop-271 full sampling**; **consensus fetch over a circuit**.
 
 ## Live validation owed (user runs; no Tor from the dev machine)
