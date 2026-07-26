@@ -21,6 +21,7 @@ public sealed class OnionHostService : BackgroundService
     private TorClient? _tor;
     private OnionServiceHost? _onion;
     private TcpListener? _clearnet;
+    private readonly SemaphoreSlim _clearnetSlots = new(512); // cap concurrent clearnet front-door connections
     private Socks5ProxyServer? _socks;
 
     public OnionHostService(OnionHostConfig config, ILogger<OnionHostService> log)
@@ -78,6 +79,7 @@ public sealed class OnionHostService : BackgroundService
                 try { client = await _clearnet.AcceptTcpClientAsync(ct).ConfigureAwait(false); }
                 catch (OperationCanceledException) { break; }
                 catch (ObjectDisposedException) { break; }
+                if (!_clearnetSlots.Wait(0)) { client.Dispose(); continue; } // at capacity — drop the new connection
                 _ = ProxyToBackendAsync(client.GetStream(), backendHost, backendPort, disposeClient: client, ct);
             }
         }, ct);
@@ -122,7 +124,7 @@ public sealed class OnionHostService : BackgroundService
             await OnionReverseProxy.PumpAsync(inbound, tcp.GetStream(), ct).ConfigureAwait(false);
         }
         catch { /* connection ended */ }
-        finally { tcp.Dispose(); }
+        finally { tcp.Dispose(); _clearnetSlots.Release(); }
     }
 
     public override async Task StopAsync(CancellationToken ct)

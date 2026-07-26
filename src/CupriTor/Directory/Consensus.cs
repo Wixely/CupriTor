@@ -35,6 +35,8 @@ internal sealed record DirectorySignature(
 /// </summary>
 internal sealed class Consensus
 {
+    private const int MinConsensusMethod = 26; // reject ancient-format consensuses; current network is 30+
+
     public int ConsensusMethod { get; private set; }
     public DateTimeOffset ValidAfter { get; private set; }
     public DateTimeOffset FreshUntil { get; private set; }
@@ -143,6 +145,8 @@ internal sealed class Consensus
 
         if (c.ValidAfter == default || c.ValidUntil == default)
             throw new DirectoryParseException("Consensus is missing validity times.");
+        if (c.ConsensusMethod < MinConsensusMethod)
+            throw new DirectoryParseException($"Consensus method {c.ConsensusMethod} is below the minimum supported ({MinConsensusMethod}).");
         return c;
     }
 

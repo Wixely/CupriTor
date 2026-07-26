@@ -64,11 +64,13 @@ proxy). Family-distinctness doc corrected to not over-promise.
 - ✅ Bounded inbound buffering (`TorStream` + AspNetCore accept channel); capped directory HTTP reads; redirect-follow disabled; shared `HttpClient`.
 - ✅ `TryParse` hardening (malformed consensus/descriptor can't crash a parser); consensus-method arg guard.
 - ✅ EntryGuards locking; per-build consensus snapshot; link-cert `CertType`/`KeyType` assertion; BouncyCastle TLS cancellation; `TorClient.DisposeAsync` idempotency.
+- ✅ Consensus-method floor (reject ancient consensuses); `dir-key-published` not-yet-valid authority-cert check; stale-guard pruning (count only listed guards, drop long-unlisted); clearnet front-door concurrency cap.
 
-**Review items — still tracked:**
-- 💤 Authenticated (v1) SENDME; consensus-method floor + `dir-key-published` not-yet-valid cert check; stale-guard pruning.
-- 💤 Secret-key zeroing; revision-counter rollback check; clearnet front-door concurrency cap.
-- 💤 Reverse-proxy half-close truncation for full-duplex protocols (needs `Socket.Shutdown`, not a generic Stream pump — WhenAll deadlocks HTTP, so left as WhenAny).
+**Review items — deliberately deferred (low value and/or regression risk):**
+- 💤 **Authenticated (v1) SENDME** — v0 works against the live network; switching without live re-validation risks breaking flow control.
+- 💤 **Revision-counter rollback check** — needs cross-lookup client state; marginal value (a rollback only yields stale-but-signed intro points).
+- 💤 **Secret-key zeroing** — moderate use-after-zero risk for low value (GC reclaims the buffers; defends only against heap dumps / paging).
+- 💤 **Reverse-proxy full-duplex half-close** — needs `Socket.Shutdown`; a generic Stream pump can't, and `WhenAll` deadlocks HTTP (left as `WhenAny`).
 
 ## Capabilities
 

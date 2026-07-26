@@ -66,7 +66,7 @@ internal static class ConsensusVerifier
             AuthorityKeyCertificate? cert = certs.FirstOrDefault(c =>
                 c.IdentityFingerprint.AsSpan().SequenceEqual(sig.IdentityFingerprint) &&
                 c.SigningKeyDigest.AsSpan().SequenceEqual(sig.SigningKeyDigest));
-            if (cert is null || cert.IsExpired(now)) continue;
+            if (cert is null || cert.IsExpired(now) || cert.IsNotYetValid(now)) continue;
 
             byte[]? digest = sig.Algorithm switch
             {

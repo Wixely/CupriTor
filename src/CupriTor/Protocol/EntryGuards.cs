@@ -43,6 +43,7 @@ internal sealed class EntryGuardManager
 {
     private const string StoreKey = "entry-guards";
     private static readonly TimeSpan RetryBackoff = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan GuardLifetime = TimeSpan.FromDays(60); // drop a guard that's been unlisted this long
 
     private readonly IStateStore _store;
     private readonly IRandomSource _random;
@@ -106,10 +107,15 @@ internal sealed class EntryGuardManager
 
     private void TopUp(List<RouterStatusEntry> candidates, DateTimeOffset now)
     {
-        bool changed = false;
+        var listed = candidates.Select(c => Convert.ToHexString(c.RsaIdentityDigest)).ToHashSet();
+
+        // Drop guards that have long since left the consensus, so a set full of stale entries can't wedge selection.
+        bool changed = _guards.RemoveAll(g => !listed.Contains(g.Fingerprint) && now - g.AddedAt > GuardLifetime) > 0;
+
         var have = _guards.Select(g => g.Fingerprint).ToHashSet();
 
-        while (_guards.Count < _targetCount)
+        // Top up until we have enough currently-LISTED guards (an unlisted guard must not block a replacement).
+        while (_guards.Count(g => listed.Contains(g.Fingerprint)) < _targetCount)
         {
             var available = candidates
                 .Where(c => !have.Contains(Convert.ToHexString(c.RsaIdentityDigest)) && !ConflictsGuardSubnet(c))

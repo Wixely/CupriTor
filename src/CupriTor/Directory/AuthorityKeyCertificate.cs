@@ -16,9 +16,11 @@ internal sealed class AuthorityKeyCertificate
     public byte[] IdentityFingerprint { get; private init; } = Array.Empty<byte>(); // 20-byte SHA-1
     public RsaKeyParameters SigningKey { get; private init; } = null!;
     public byte[] SigningKeyDigest { get; private init; } = Array.Empty<byte>();     // SHA-1 of signing key DER
+    public DateTimeOffset Published { get; private init; }
     public DateTimeOffset Expires { get; private init; }
 
     public bool IsExpired(DateTimeOffset now) => now >= Expires;
+    public bool IsNotYetValid(DateTimeOffset now) => Published != default && now < Published;
 
     public static bool TryParse(string text, out AuthorityKeyCertificate certificate)
     {
@@ -31,6 +33,7 @@ internal sealed class AuthorityKeyCertificate
             byte[]? identityDer = null;
             byte[]? signingDer = null;
             byte[]? certificationSig = null;
+            DateTimeOffset published = default;
             DateTimeOffset expires = default;
 
             foreach (DirectoryItem item in items)
@@ -39,6 +42,9 @@ internal sealed class AuthorityKeyCertificate
                 {
                     case "fingerprint":
                         if (item.Arguments.Length >= 1) statedFingerprint = Convert.FromHexString(item.Arguments[0]);
+                        break;
+                    case "dir-key-published":
+                        published = ParseTime(item.Arguments);
                         break;
                     case "dir-key-expires":
                         expires = ParseTime(item.Arguments);
@@ -79,6 +85,7 @@ internal sealed class AuthorityKeyCertificate
                 IdentityFingerprint = computedFp,
                 SigningKey = TorRsa.ParsePkcs1PublicKey(signingDer),
                 SigningKeyDigest = TorRsa.Fingerprint(signingDer),
+                Published = published,
                 Expires = expires,
             };
             return true;
