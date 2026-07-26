@@ -1,5 +1,4 @@
 using CupriTor;
-using CupriTor.Directory;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //  CupriTor sample — fetch over Tor with HttpClient
@@ -15,19 +14,12 @@ string url = args.Length > 0
     ? args[0]
     : "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/";
 
-// Directory-authority DirPorts used only to bootstrap the (cryptographically verified) consensus.
-string[] directoryCaches =
-{
-    "128.31.0.39:9131", "86.59.21.38:80", "45.66.33.45:80", "131.188.40.189:80",
-    "193.23.244.244:80", "171.25.193.9:443", "199.58.81.140:80", "204.13.164.118:80",
-};
-
 Console.WriteLine("CupriTor sample — HttpClient over Tor");
 Console.WriteLine($"Target: {url}\n");
 
 try
 {
-    await using var tor = new TorClient(new TorClientOptions { DirectorySource = new HttpDirectorySource(directoryCaches) });
+    await using var tor = new TorClient(); // no config needed — uses the built-in directory authorities
     tor.StatusChanged += (_, s) => Console.WriteLine($"  [{s.Progress,4:P0}] {s.Message}"); // live progress → loading bar
 
     Console.WriteLine("Bootstrapping Tor (fetching + verifying the consensus)…");

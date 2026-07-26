@@ -17,9 +17,10 @@ public sealed class TorClientOptions
     public IStateStore StateStore { get; set; } = new InMemoryStateStore();
 
     /// <summary>
-    /// Source of the initial directory documents (consensus, authority keys, microdescriptors). Required
-    /// before <see cref="TorClient.StartAsync"/>. Use <see cref="HttpDirectorySource"/> to bootstrap from
-    /// directory caches.
+    /// Source of the initial directory documents (consensus, authority keys, microdescriptors). Optional — when
+    /// left null, <see cref="TorClient.StartAsync"/> uses <see cref="HttpDirectorySource.CreateDefault"/> (the
+    /// built-in directory authorities), so <c>new TorClient()</c> works out of the box. Set it to bootstrap from
+    /// your own directory caches.
     /// </summary>
     public IDirectorySource? DirectorySource { get; set; }
 

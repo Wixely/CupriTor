@@ -14,11 +14,12 @@ public class TorClientTests
     }
 
     [Fact]
-    public async Task StartAsync_Without_DirectorySource_Throws()
+    public void Without_A_DirectorySource_The_Builtin_Authorities_Are_Used()
     {
-        var client = new TorClient();
-        await Assert.ThrowsAsync<TorBootstrapException>(() => client.StartAsync());
-        Assert.False(client.IsBootstrapped);
+        // new TorClient() needs no configuration: StartAsync falls back to the built-in directory authorities.
+        Assert.NotEmpty(HttpDirectorySource.DefaultDirectoryCaches);
+        Assert.NotNull(HttpDirectorySource.CreateDefault());
+        Assert.Null(new TorClientOptions().DirectorySource); // still opt-in to override
     }
 
     [Fact]

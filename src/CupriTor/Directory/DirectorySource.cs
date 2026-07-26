@@ -40,6 +40,19 @@ public sealed class HttpDirectorySource : IDirectorySource
         _http.DefaultRequestHeaders.Add("User-Agent", "CupriTor/0.1");
     }
 
+    /// <summary>
+    /// Directory-authority DirPorts used to bootstrap when no source is configured (<see cref="CreateDefault"/>).
+    /// Public information; these can change over time — override with your own list if needed.
+    /// </summary>
+    public static IReadOnlyList<string> DefaultDirectoryCaches { get; } = new[]
+    {
+        "128.31.0.39:9131", "86.59.21.38:80", "45.66.33.45:80", "131.188.40.189:80",
+        "193.23.244.244:80", "171.25.193.9:443", "199.58.81.140:80", "204.13.164.118:80",
+    };
+
+    /// <summary>An <see cref="HttpDirectorySource"/> over the built-in <see cref="DefaultDirectoryCaches"/>.</summary>
+    public static HttpDirectorySource CreateDefault(TimeSpan? timeout = null) => new(DefaultDirectoryCaches, timeout);
+
     public Task<string> FetchConsensusAsync(CancellationToken ct = default) =>
         GetWithFailoverAsync("/tor/status-vote/current/consensus-microdesc", ct);
 

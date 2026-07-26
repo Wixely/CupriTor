@@ -25,6 +25,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     private readonly CancellationTokenSource _shutdown = new();
     private TorNetwork? _network;
     private Task? _refreshLoop;
+    private IDirectorySource? _directorySource; // resolved at StartAsync (options' source, or the built-in default)
     private int _disposed;
 
     public TorClient(TorClientOptions? options = null)
@@ -60,15 +61,15 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// </summary>
     public async Task StartAsync(CancellationToken ct = default)
     {
-        if (_options.DirectorySource is null)
-            throw new TorBootstrapException("TorClientOptions.DirectorySource must be set before StartAsync.");
+        // No directory source configured? Fall back to the built-in authorities so `new TorClient()` just works.
+        IDirectorySource dir = _directorySource = _options.DirectorySource ?? HttpDirectorySource.CreateDefault(_options.Timeout);
 
         try
         {
-            Consensus consensus = await FetchVerifiedConsensusAsync(_options.DirectorySource, DateTimeOffset.UtcNow, reportProgress: true, ct).ConfigureAwait(false);
+            Consensus consensus = await FetchVerifiedConsensusAsync(dir, DateTimeOffset.UtcNow, reportProgress: true, ct).ConfigureAwait(false);
             Report(TorPhase.LoadingGuards, "Priming entry guards…", 0.85);
             var guards = new EntryGuardManager(_options.StateStore, _random, _options.GuardCount);
-            _network = new TorNetwork(consensus, guards, _options.DirectorySource, _options.Transport, _random, _options.Timeout);
+            _network = new TorNetwork(consensus, guards, dir, _options.Transport, _random, _options.Timeout);
 
             if (_options.AutoRefreshConsensus)
                 _refreshLoop ??= Task.Run(() => RefreshConsensusLoopAsync(_shutdown.Token));
@@ -135,7 +136,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             {
                 try
                 {
-                    Consensus fresh = await FetchVerifiedConsensusAsync(_options.DirectorySource!, DateTimeOffset.UtcNow, reportProgress: false, ct).ConfigureAwait(false);
+                    Consensus fresh = await FetchVerifiedConsensusAsync(_directorySource!, DateTimeOffset.UtcNow, reportProgress: false, ct).ConfigureAwait(false);
                     _network?.UpdateConsensus(fresh);
                     break;
                 }
