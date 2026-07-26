@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>cupritor-httpclient-sample</AssemblyName>
+    <!-- References BouncyCastle transitively, which isn't AOT-annotated; ship self-contained single-file instead. -->
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/CupriTor/CupriTor.csproj" />
+  </ItemGroup>
+
+</Project>

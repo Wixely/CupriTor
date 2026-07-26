@@ -6,6 +6,8 @@
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/OnionWebApp/OnionWebApp.csproj" />
+    <Project Path="samples/TorHttpClient/TorHttpClient.csproj" />
+    <Project Path="samples/TorSocks5Proxy/TorSocks5Proxy.csproj" />
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/CupriTor.Tests/CupriTor.Tests.csproj" />

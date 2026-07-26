@@ -4,19 +4,12 @@ Legend: ✅ done · 🔜 planned/requested · 💤 deferred · 🔬 investigate/
 
 ## Requested (2026-07-25)
 
-1. 🔜 **Sample/test apps for every scenario + cross-platform binaries.**
-   One small runnable app per capability:
-   - host ASP.NET Core on onion / clearnet / both (in-process, `CupriTor.AspNetCore`)
-   - sidecar reverse proxy any local app (`CupriTor.Host`)
-   - SOCKS5 outbound proxy
-   - native client: `HttpClient` + raw dialer to **onion and clearnet**
-   - node/relay (once #2 lands)
-   - connection status / progress demo (#3)
-
-   Built by **GitHub Actions** into per-OS zips — **Windows** and **Ubuntu** — as **self-contained single-file**,
-   and **NativeAOT where feasible**. AOT note: core CupriTor is AOT-compatible and CupriCurve is too, so the CLI
-   client/SOCKS samples should AOT (pending a BouncyCastle trim/AOT check); the ASP.NET Core in-process sample
-   references the ASP.NET shared framework (not AOT-annotated) → ship it self-contained single-file, not AOT.
+1. ✅ **Sample apps + cross-platform bundles** (AOT deferred). Clearly-labeled runnable samples in `samples/`:
+   `OnionWebApp` (in-process onion hosting, dual-bind), `TorHttpClient` (HttpClient over Tor → onion/clearnet),
+   `TorSocks5Proxy` (local SOCKS5 over Tor). `.github/workflows/samples.yml` builds each into **self-contained
+   single-file** zips for **Windows** and **Ubuntu** and attaches them to releases. Still open: **NativeAOT** —
+   deferred pending a BouncyCastle AOT/trim audit (the CLI samples could AOT; the ASP.NET one ships self-contained).
+   Not-yet-built samples: node/relay (once #2 lands) and a connection-status/progress demo (#3).
 
 2. 🔜 **Node / relay / client roles — explicit developer control (relay is opt-in, default OFF).**
    Support running as a **relay/node** that routes others' traffic, in addition to client + onion-service.
