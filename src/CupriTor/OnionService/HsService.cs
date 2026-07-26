@@ -31,6 +31,9 @@ internal sealed class HsService
     private readonly object _introLock = new();
     private readonly List<(OrConnection Conn, Circuit Circuit)> _rendezvous = new(); // live served-client circuits
     private readonly object _rendLock = new();
+    private readonly HashSet<string> _introReplay = new(); // INTRODUCE2 replay cache (rend-spec-v3 §3.3.2)
+    private readonly object _replayLock = new();
+    private const int MaxIntroReplayEntries = 8192;
     private Ed25519ExpandedKey _identityKey;
     private byte[] _identityPub = Array.Empty<byte>();
     private int _periodLength = HsTimePeriod.DefaultLengthMinutes;
@@ -347,6 +350,16 @@ internal sealed class HsService
         {
             // The client used one of our active period descriptors; try each subcredential until one decrypts.
             byte[] cell = introduce2.Data.ToArray();
+
+            // Replay protection: an identical INTRODUCE2 must be processed at most once (an on-path relay could
+            // otherwise replay it to make us repeatedly build circuits to an attacker-chosen rendezvous point).
+            string replayKey = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(cell));
+            lock (_replayLock)
+            {
+                if (!_introReplay.Add(replayKey)) { _trace?.Invoke("INTRODUCE2 replay dropped"); return; }
+                if (_introReplay.Count > MaxIntroReplayEntries) _introReplay.Clear();
+            }
+
             IntroduceRequest? request = null;
             foreach (byte[] subcred in _activeSubcredentials)
                 if (HsIntroduce.TryOpen(cell, ip.EncKeyPrivate, ip.EncKeyPublic, subcred, out IntroduceRequest r)) { request = r; break; }

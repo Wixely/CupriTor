@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Threading.Channels;
 
 namespace CupriTor.Protocol;
 
@@ -32,12 +33,14 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     private readonly uint _circId;
 
     private const int KhLength = 20; // per-circuit nonce KH: the final 20 bytes of the ntor KDF output
-    private readonly List<RelayCrypto> _hops = new();
+    private volatile RelayCrypto[] _hops = Array.Empty<RelayCrypto>(); // copy-on-append under _hopsLock; elements are stable so reads are lock-free
     private readonly List<byte[]> _hopKh = new();  // KH of each ntor hop (for ESTABLISH_INTRO's HANDSHAKE_AUTH)
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<ushort, TorStream> _streams = new();
     private readonly ConcurrentDictionary<ushort, TaskCompletionSource<RelayCell>> _pendingOpens = new();
-    private readonly ConcurrentDictionary<RelayCommand, TaskCompletionSource<RelayCell>> _pendingControl = new();
+    // One buffered channel per control command, so concurrent/bursty replies (e.g. INTRODUCE2 on a busy service)
+    // are queued FIFO rather than a second waiter clobbering the first or a reply being dropped.
+    private readonly ConcurrentDictionary<RelayCommand, Channel<RelayCell>> _control = new();
     private readonly object _hopsLock = new();
 
     private readonly FlowControlWindow _circuitPackage = FlowControlWindow.Circuit();
@@ -58,7 +61,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         _circId = circId;
     }
 
-    public int HopCount => _hops.Count;
+    public int HopCount => _hops.Length;
 
     /// <summary>True once the circuit has faulted (DESTROY, integrity failure, or the link dropped).</summary>
     public bool IsFaulted => _fault is not null;
@@ -92,7 +95,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         byte[] km = Ntor.DeriveKeys(keySeed, RelayCrypto.KeyMaterialLength + KhLength); // Df|Db|Kf|Kb|KH
         lock (_hopsLock)
         {
-            _hops.Add(new RelayCrypto(km));
+            _hops = [.. _hops, new RelayCrypto(km)];
             _hopKh.Add(km[RelayCrypto.KeyMaterialLength..].ToArray());
         }
     }
@@ -127,7 +130,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     {
         (byte[] handshake, Ntor.ClientState state) = Ntor.CreateClient(nodeId, ntorOnionKey);
         byte[] extend2 = new Extend2Payload(specifiers, HandshakeType.Ntor, handshake).Encode();
-        int lastHop = _hops.Count - 1;
+        int lastHop = _hops.Length - 1;
         await SendRelayCellAsync(lastHop, RelayCommand.Extend2, 0, extend2, early: true, ct).ConfigureAwait(false);
 
         RelayCell reply = await ReceiveRelayCellDirectAsync(lastHop, ct).ConfigureAwait(false);
@@ -149,7 +152,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     public void AppendHop(ReadOnlySpan<byte> keyMaterial)
     {
         var crypto = RelayCrypto.CreateV3Hs(keyMaterial); // v3 HS rendezvous, client side (SHA3-256 + AES-256)
-        lock (_hopsLock) _hops.Add(crypto);
+        lock (_hopsLock) _hops = [.. _hops, crypto];
     }
 
     /// <summary>
@@ -159,7 +162,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     public void AppendHopReversed(ReadOnlySpan<byte> keyMaterial)
     {
         var crypto = RelayCrypto.CreateV3HsService(keyMaterial);
-        lock (_hopsLock) _hops.Add(crypto);
+        lock (_hopsLock) _hops = [.. _hops, crypto];
     }
 
     // ---- operation (after Start) ----
@@ -190,7 +193,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         var stream = new TorStream(sid, this);
         _streams[sid] = stream;
 
-        int last = _hops.Count - 1;
+        int last = _hops.Length - 1;
         await SendRelayCellAsync(last, begin, sid, payload, early: false, ct).ConfigureAwait(false);
 
         using var reg = ct.Register(() => opened.TrySetCanceled(ct));
@@ -210,27 +213,28 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
 
     // ---- HS control cells (stream 0) ----
 
-    /// <summary>Register interest in an inbound control relay command; completes when the receive loop dispatches it.</summary>
-    public Task<RelayCell> WaitForAsync(RelayCommand expect, CancellationToken ct)
+    /// <summary>Await the next inbound control relay cell of the given command (buffered FIFO by the receive loop).</summary>
+    public async Task<RelayCell> WaitForAsync(RelayCommand expect, CancellationToken ct)
     {
         ThrowIfFaulted();
-        var tcs = new TaskCompletionSource<RelayCell>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pendingControl[expect] = tcs;
-        ct.Register(() => tcs.TrySetCanceled(ct));
-        return tcs.Task;
+        return await ControlChannel(expect).Reader.ReadAsync(ct).ConfigureAwait(false);
     }
+
+    private Channel<RelayCell> ControlChannel(RelayCommand command) =>
+        _control.GetOrAdd(command, static _ => Channel.CreateBounded<RelayCell>(
+            new BoundedChannelOptions(512) { FullMode = BoundedChannelFullMode.DropWrite }));
 
     /// <summary>Send a stream-0 control cell and await a specific reply command (e.g. ESTABLISH_RENDEZVOUS → RENDEZVOUS_ESTABLISHED).</summary>
     public async Task<RelayCell> SendControlAndAwaitAsync(RelayCommand send, byte[] payload, RelayCommand expect, bool early, CancellationToken ct)
     {
         Task<RelayCell> wait = WaitForAsync(expect, ct);
-        await SendRelayCellAsync(_hops.Count - 1, send, 0, payload, early, ct).ConfigureAwait(false);
+        await SendRelayCellAsync(_hops.Length - 1, send, 0, payload, early, ct).ConfigureAwait(false);
         return await wait.ConfigureAwait(false);
     }
 
     /// <summary>Send a stream-0 control cell without awaiting a reply.</summary>
     public Task SendControlAsync(RelayCommand send, byte[] payload, bool early, CancellationToken ct) =>
-        SendRelayCellAsync(_hops.Count - 1, send, 0, payload, early, ct);
+        SendRelayCellAsync(_hops.Length - 1, send, 0, payload, early, ct);
 
     /// <summary>
     /// Service side: register a handler for inbound RELAY_BEGIN. The circuit creates a duplex stream for the
@@ -245,7 +249,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         OnionStreamHandler? handler = _incomingHandler;
         if (handler is null) return;
         ushort sid = begin.StreamId;
-        int last = _hops.Count - 1;
+        int last = _hops.Length - 1;
 
         string request = RelayBeginPayload.TryParse(begin.Data.Span, out RelayBeginPayload payload) ? payload.Target : "";
 
@@ -275,16 +279,16 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         while (!_circuitPackage.CanPackage)
             await _circuitPackageAvailable.WaitAsync(ct).ConfigureAwait(false);
         _circuitPackage.TryPackage();
-        await SendRelayCellAsync(_hops.Count - 1, RelayCommand.Data, streamId, data.ToArray(), early: false, ct).ConfigureAwait(false);
+        await SendRelayCellAsync(_hops.Length - 1, RelayCommand.Data, streamId, data.ToArray(), early: false, ct).ConfigureAwait(false);
     }
 
     public ValueTask SendSendmeAsync(ushort streamId, CancellationToken ct) =>
-        new(SendRelayCellAsync(_hops.Count - 1, RelayCommand.Sendme, streamId, RelaySendmePayload.Legacy().Encode(), early: false, ct));
+        new(SendRelayCellAsync(_hops.Length - 1, RelayCommand.Sendme, streamId, RelaySendmePayload.Legacy().Encode(), early: false, ct));
 
     public async ValueTask SendEndAsync(ushort streamId, CancellationToken ct)
     {
         _streams.TryRemove(streamId, out _);
-        await SendRelayCellAsync(_hops.Count - 1, RelayCommand.End, streamId, new RelayEndPayload(RelayEndReason.Done).Encode(), early: false, ct).ConfigureAwait(false);
+        await SendRelayCellAsync(_hops.Length - 1, RelayCommand.End, streamId, new RelayEndPayload(RelayEndReason.Done).Encode(), early: false, ct).ConfigureAwait(false);
     }
 
     // ---- relay-cell send/receive ----
@@ -298,9 +302,10 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         await _writeLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            byte[] digest = _hops[targetHop].ForwardDigest(cell);
+            RelayCrypto[] hops = _hops; // snapshot: consistent hop set for the whole encrypt
+            byte[] digest = hops[targetHop].ForwardDigest(cell);
             digest.CopyTo(cell, RelayCell.DigestOffset);
-            for (int i = targetHop; i >= 0; i--) _hops[i].CryptForward(cell);
+            for (int i = targetHop; i >= 0; i--) hops[i].CryptForward(cell);
             await _codec.WriteAsync(_link, new Cell(_circId, early ? CellCommand.RelayEarly : CellCommand.Relay, cell), ct).ConfigureAwait(false);
         }
         finally { _writeLock.Release(); }
@@ -320,7 +325,8 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     /// <summary>Decrypt through hops 0..expectedHop, verify recognized + integrity digest, and parse.</summary>
     private RelayCell DecryptAndVerify(byte[] body, int expectedHop)
     {
-        for (int i = 0; i <= expectedHop; i++) _hops[i].CryptBackward(body);
+        RelayCrypto[] hops = _hops; // snapshot: consistent hop set for the whole decrypt
+        for (int i = 0; i <= expectedHop; i++) hops[i].CryptBackward(body);
 
         if (body[RelayCell.RecognizedOffset] != 0 || body[RelayCell.RecognizedOffset + 1] != 0)
             throw new CircuitException("Relay cell not recognized at the expected hop.");
@@ -328,7 +334,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         byte[] received = body[RelayCell.DigestOffset..(RelayCell.DigestOffset + 4)];
         var zeroed = (byte[])body.Clone();
         Array.Clear(zeroed, RelayCell.DigestOffset, 4);
-        byte[] expected = _hops[expectedHop].BackwardDigest(zeroed);
+        byte[] expected = hops[expectedHop].BackwardDigest(zeroed);
         if (!expected.AsSpan().SequenceEqual(received))
             throw new CircuitException("Relay cell integrity digest mismatch.");
 
@@ -350,7 +356,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
                     continue; // ignore non-relay cells (PADDING etc.)
 
                 int last;
-                lock (_hopsLock) last = _hops.Count - 1; // may grow after a RENDEZVOUS2 appends the service hop
+                lock (_hopsLock) last = _hops.Length - 1; // may grow after a RENDEZVOUS2 appends the service hop
                 RelayCell parsed = DecryptAndVerify(cell.Payload.ToArray(), last);
                 await DispatchAsync(parsed, ct).ConfigureAwait(false);
             }
@@ -368,7 +374,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         {
             case RelayCommand.Data:
                 if (_circuitDeliver.OnDeliver())
-                    await SendRelayCellAsync(_hops.Count - 1, RelayCommand.Sendme, 0, RelaySendmePayload.Legacy().Encode(), early: false, ct).ConfigureAwait(false);
+                    await SendRelayCellAsync(_hops.Length - 1, RelayCommand.Sendme, 0, RelaySendmePayload.Legacy().Encode(), early: false, ct).ConfigureAwait(false);
                 if (_streams.TryGetValue(cell.StreamId, out TorStream? s))
                     await s.OnDataAsync(cell.Data.ToArray(), ct).ConfigureAwait(false);
                 break;
@@ -402,9 +408,8 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
                 throw new CircuitException($"TRUNCATED (reason {ReasonByte(cell.Data)}).");
 
             default:
-                // Route HS control replies (RENDEZVOUS_ESTABLISHED, INTRODUCE_ACK, RENDEZVOUS2, …) to any waiter.
-                if (_pendingControl.TryRemove(cell.Command, out TaskCompletionSource<RelayCell>? control))
-                    control.TrySetResult(cell);
+                // Buffer HS control replies (RENDEZVOUS_ESTABLISHED, INTRODUCE_ACK, RENDEZVOUS2, INTRODUCE2, …) FIFO.
+                ControlChannel(cell.Command).Writer.TryWrite(cell);
                 break;
         }
     }
@@ -426,7 +431,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     {
         _fault ??= e;
         foreach (var open in _pendingOpens.Values) open.TrySetException(e);
-        foreach (var control in _pendingControl.Values) control.TrySetException(e);
+        foreach (var ch in _control.Values) ch.Writer.TryComplete(e); // faults pending WaitForAsync reads
         foreach (var s in _streams.Values) s.OnEnd();
     }
 

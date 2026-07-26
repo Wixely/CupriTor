@@ -119,19 +119,10 @@ public sealed class OnionHostService : BackgroundService
         try
         {
             await tcp.ConnectAsync(backendHost, backendPort, ct).ConfigureAwait(false);
-            Stream backend = tcp.GetStream();
-            await Task.WhenAny(Copy(inbound, backend, ct), Copy(backend, inbound, ct)).ConfigureAwait(false);
+            await OnionReverseProxy.PumpAsync(inbound, tcp.GetStream(), ct).ConfigureAwait(false);
         }
         catch { /* connection ended */ }
         finally { tcp.Dispose(); }
-    }
-
-    private static async Task Copy(Stream from, Stream to, CancellationToken ct)
-    {
-        var buffer = new byte[8192];
-        int n;
-        while ((n = await from.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
-            await to.WriteAsync(buffer.AsMemory(0, n), ct).ConfigureAwait(false);
     }
 
     public override async Task StopAsync(CancellationToken ct)

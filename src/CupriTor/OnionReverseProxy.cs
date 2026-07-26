@@ -32,7 +32,12 @@ public static class OnionReverseProxy
         }
     };
 
-    /// <summary>Bidirectionally copy between two streams until either direction ends. Does not dispose either stream.</summary>
+    /// <summary>
+    /// Bidirectionally copy between two streams until either direction ends, then return (the caller disposes both
+    /// streams, which unblocks the other direction). Correct for request/response protocols like HTTP — the response
+    /// direction copies fully before it completes. Does not dispose either stream. (Full-duplex protocols that stream
+    /// both ways at once are not half-close aware here — a limitation of a generic Stream pump without Socket.Shutdown.)
+    /// </summary>
     public static async Task PumpAsync(Stream a, Stream b, CancellationToken ct)
     {
         try

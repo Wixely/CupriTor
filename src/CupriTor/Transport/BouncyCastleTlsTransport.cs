@@ -26,8 +26,12 @@ public sealed class BouncyCastleTlsTransport : ITlsTransport
             var client = new AcceptAllTlsClient(crypto);
             var protocol = new TlsClientProtocol(tcp.GetStream());
 
-            // BouncyCastle's TlsClientProtocol.Connect performs blocking I/O; run it off the caller's thread.
-            await Task.Run(() => protocol.Connect(client), ct).ConfigureAwait(false);
+            // BouncyCastle's TlsClientProtocol.Connect performs blocking I/O; run it off the caller's thread. Task.Run's
+            // ct only affects scheduling, so also close the socket on cancellation to actually abort the blocking call.
+            using (ct.Register(static s => { try { ((TcpClient)s!).Close(); } catch { } }, tcp))
+            {
+                await Task.Run(() => protocol.Connect(client), ct).ConfigureAwait(false);
+            }
 
             return new BcConnection(tcp, protocol, client.PeerCertificateDer ?? Array.Empty<byte>());
         }
