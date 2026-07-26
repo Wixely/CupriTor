@@ -71,16 +71,17 @@ internal sealed class TorNetwork
     public async Task<(OrConnection Connection, Circuit Circuit)> BuildExitCircuitAsync(int port, int middleCount, DateTimeOffset now, CancellationToken ct)
     {
         const int maxExitProbes = 8;
+        IReadOnlyList<RouterStatusEntry> routers = Consensus.Routers; // snapshot: one consensus for the whole selection
 
         // Entry guard + middles first, so the exit can be policy-checked and kept distinct from them.
-        var selection = Guards.SelectGuard(Consensus.Routers, now)
+        var selection = Guards.SelectGuard(routers, now)
             ?? throw new InvalidOperationException("No usable entry guard is available from the current consensus.");
         var perHop = new List<IReadOnlyCollection<string>>();
         for (int i = 0; i < middleCount; i++) perHop.Add(new[] { "Fast" });
-        if (!PathSelector.TryExtendPath(Consensus.Routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] guardAndMiddles))
+        if (!PathSelector.TryExtendPath(routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] guardAndMiddles))
             throw new InvalidOperationException("Could not select a guard + middle path from the consensus.");
 
-        var candidates = Consensus.Routers.Where(r =>
+        var candidates = routers.Where(r =>
             r.Flags.Contains("Exit") && !r.Flags.Contains("BadExit") &&
             r.Flags.Contains("Fast") && r.Flags.Contains("Running") && r.Flags.Contains("Valid") &&
             r.MicrodescriptorSha256 is not null &&
@@ -120,7 +121,8 @@ internal sealed class TorNetwork
     /// <summary>Select the entry guard (hop 0), <paramref name="middleCount"/> random middles, and an optional forced final hop.</summary>
     private (GuardEntry Guard, RouterStatusEntry[] Path) SelectPath(int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now)
     {
-        var selection = Guards.SelectGuard(Consensus.Routers, now)
+        IReadOnlyList<RouterStatusEntry> routers = Consensus.Routers; // snapshot: one consensus for the whole selection
+        var selection = Guards.SelectGuard(routers, now)
             ?? throw new InvalidOperationException("No usable entry guard is available from the current consensus.");
 
         var perHop = new List<IReadOnlyCollection<string>>();
@@ -128,14 +130,14 @@ internal sealed class TorNetwork
 
         if (forcedFinalHop is null)
         {
-            if (!PathSelector.TryExtendPath(Consensus.Routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] selected))
+            if (!PathSelector.TryExtendPath(routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] selected))
                 throw new InvalidOperationException("Could not select a circuit path from the consensus.");
             return (selection.Guard, selected);
         }
 
         // Forced final hop (HSDir / intro / rendezvous): choose middles distinct (relay + /16) from BOTH the guard
         // and the final hop, so no relay appears twice and no two hops share a /16 — the exit path already does this.
-        if (!PathSelector.TryExtendPath(Consensus.Routers, new[] { selection.Router, forcedFinalHop }, perHop, _random, out RouterStatusEntry[] withBoth))
+        if (!PathSelector.TryExtendPath(routers, new[] { selection.Router, forcedFinalHop }, perHop, _random, out RouterStatusEntry[] withBoth))
             throw new InvalidOperationException("Could not select a circuit path from the consensus.");
 
         // withBoth = [guard, finalHop, middle0, middle1, …] → reorder to [guard, middle0, …, finalHop].

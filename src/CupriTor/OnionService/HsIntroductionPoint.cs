@@ -33,7 +33,7 @@ internal static class HsSuperencryptedLayer
                 }
             }
         }
-        catch (Exception e) when (e is DirectoryParseException or FormatException) { }
+        catch (Exception e) when (e is DirectoryParseException or FormatException or OverflowException or IndexOutOfRangeException or ArgumentException) { }
         return false;
     }
 }
@@ -83,7 +83,7 @@ internal static class HsInnerLayer
             Flush();
             return true;
         }
-        catch (Exception e) when (e is DirectoryParseException or FormatException)
+        catch (Exception e) when (e is DirectoryParseException or FormatException or OverflowException or IndexOutOfRangeException or ArgumentException)
         {
             introductionPoints = new List<IntroductionPoint>();
             return false;

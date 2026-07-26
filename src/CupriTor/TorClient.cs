@@ -25,6 +25,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     private readonly CancellationTokenSource _shutdown = new();
     private TorNetwork? _network;
     private Task? _refreshLoop;
+    private int _disposed;
 
     public TorClient(TorClientOptions? options = null)
     {
@@ -256,6 +257,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _shutdown.Cancel();
         if (_refreshLoop is not null)
         {

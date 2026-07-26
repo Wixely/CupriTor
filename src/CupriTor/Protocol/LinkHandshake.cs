@@ -96,6 +96,8 @@ internal static class LinkHandshake
             ?? throw new LinkHandshakeException("Missing identity->signing certificate (type 4).");
         if (!TorCertificate.TryParse(signingCertBytes, out TorCertificate signingCert))
             throw new LinkHandshakeException("Malformed signing certificate.");
+        if (signingCert.CertType != TorCertificate.Type.SigningByIdentity || signingCert.CertifiedKeyType != TorCertificate.KeyType.Ed25519)
+            throw new LinkHandshakeException("Signing certificate has the wrong cert/key type.");
         if (signingCert.IsExpired(now))
             throw new LinkHandshakeException("Signing certificate has expired.");
 
@@ -111,6 +113,9 @@ internal static class LinkHandshake
             ?? throw new LinkHandshakeException("Missing signing->link certificate (type 5).");
         if (!TorCertificate.TryParse(linkCertBytes, out TorCertificate linkCert))
             throw new LinkHandshakeException("Malformed link certificate.");
+        // The TLS-bind compare below assumes the certified key is a SHA-256 of the X.509 cert — enforce that type.
+        if (linkCert.CertType != TorCertificate.Type.TlsLinkBySigning || linkCert.CertifiedKeyType != TorCertificate.KeyType.Sha256OfX509)
+            throw new LinkHandshakeException("Link certificate has the wrong cert/key type.");
         if (linkCert.IsExpired(now))
             throw new LinkHandshakeException("Link certificate has expired.");
         if (!linkCert.VerifySignature(signingKey.Span))

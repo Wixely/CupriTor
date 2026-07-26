@@ -48,6 +48,7 @@ internal sealed class EntryGuardManager
     private readonly IRandomSource _random;
     private readonly int _targetCount;
     private readonly List<GuardEntry> _guards;
+    private readonly object _lock = new(); // circuit builds run concurrently; all guard-set access is serialized
 
     public EntryGuardManager(IStateStore store, IRandomSource random, int targetCount = 3)
     {
@@ -69,29 +70,38 @@ internal sealed class EntryGuardManager
             .Where(r => r.Flags.Contains("Guard") && r.Flags.Contains("Running") && r.Flags.Contains("Valid"))
             .ToDictionary(r => Convert.ToHexString(r.RsaIdentityDigest));
 
-        TopUp(listed.Values.ToList(), now);
-
-        foreach (GuardEntry g in _guards)
+        lock (_lock)
         {
-            if (!g.IsUsable(now)) continue;
-            if (listed.TryGetValue(g.Fingerprint, out RouterStatusEntry? router))
-                return (g, router);
+            TopUp(listed.Values.ToList(), now);
+
+            foreach (GuardEntry g in _guards)
+            {
+                if (!g.IsUsable(now)) continue;
+                if (listed.TryGetValue(g.Fingerprint, out RouterStatusEntry? router))
+                    return (g, router);
+            }
+            return null;
         }
-        return null;
     }
 
     public void MarkSuccess(GuardEntry guard, DateTimeOffset now)
     {
-        guard.Reachable = true;
-        guard.RetryAfter = null;
-        Persist();
+        lock (_lock)
+        {
+            guard.Reachable = true;
+            guard.RetryAfter = null;
+            Persist();
+        }
     }
 
     public void MarkFailure(GuardEntry guard, DateTimeOffset now)
     {
-        guard.Reachable = false;
-        guard.RetryAfter = now + RetryBackoff;
-        Persist();
+        lock (_lock)
+        {
+            guard.Reachable = false;
+            guard.RetryAfter = now + RetryBackoff;
+            Persist();
+        }
     }
 
     private void TopUp(List<RouterStatusEntry> candidates, DateTimeOffset now)

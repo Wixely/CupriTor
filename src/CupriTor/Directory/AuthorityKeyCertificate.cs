@@ -83,7 +83,7 @@ internal sealed class AuthorityKeyCertificate
             };
             return true;
         }
-        catch (Exception e) when (e is DirectoryParseException or FormatException)
+        catch (Exception e) when (e is DirectoryParseException or FormatException or OverflowException or IndexOutOfRangeException or ArgumentException)
         {
             return false;
         }

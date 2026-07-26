@@ -15,8 +15,9 @@ internal sealed class CupriTorConnectionListener : IConnectionListener
     private readonly CupriTorEndPoint _endpoint;
     private readonly Func<CupriTorOnionOptions, CancellationToken, Task<TorClient>> _torClient;
     private readonly ILogger _log;
+    // Bounded so accepted-but-not-yet-served onion streams can't queue without limit; EnqueueAsync waits when full.
     private readonly Channel<ConnectionContext> _accepted =
-        Channel.CreateUnbounded<ConnectionContext>(new UnboundedChannelOptions { SingleReader = true });
+        Channel.CreateBounded<ConnectionContext>(new BoundedChannelOptions(256) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly CancellationTokenSource _cts = new();
 
     private OnionServiceHost? _host;

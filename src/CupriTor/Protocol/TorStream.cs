@@ -21,7 +21,10 @@ internal sealed class TorStream : Stream
 {
     private readonly ushort _streamId;
     private readonly IRelayStreamController _controller;
-    private readonly Channel<byte[]> _inbound = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
+    // Bounded so a peer that outruns the app can't buffer without limit; a full buffer stalls OnDataAsync, which
+    // withholds the SENDME and throttles the peer (backpressure) rather than growing memory unboundedly.
+    private readonly Channel<byte[]> _inbound = Channel.CreateBounded<byte[]>(
+        new BoundedChannelOptions(1024) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly FlowControlWindow _window = FlowControlWindow.Stream();
     private readonly SemaphoreSlim _packageAvailable = new(0);
 
@@ -39,7 +42,8 @@ internal sealed class TorStream : Stream
 
     public async ValueTask OnDataAsync(byte[] data, CancellationToken ct = default)
     {
-        _inbound.Writer.TryWrite(data);
+        // Block here if the app hasn't drained the buffer — this withholds the SENDME below and throttles the peer.
+        await _inbound.Writer.WriteAsync(data, ct).ConfigureAwait(false);
         if (_window.OnDeliver())
             await _controller.SendSendmeAsync(_streamId, ct).ConfigureAwait(false);
     }

@@ -61,7 +61,7 @@ internal sealed class Consensus
             consensus = ParseInternal(text);
             return true;
         }
-        catch (Exception e) when (e is DirectoryParseException or FormatException or OverflowException)
+        catch (Exception e) when (e is DirectoryParseException or FormatException or OverflowException or IndexOutOfRangeException or ArgumentException)
         {
             consensus = null!;
             return false;
@@ -91,6 +91,7 @@ internal sealed class Consensus
                         throw new DirectoryParseException("Document is not a consensus.");
                     break;
                 case "consensus-method":
+                    if (a.Length < 1) throw new DirectoryParseException("consensus-method has no argument.");
                     c.ConsensusMethod = int.Parse(a[0], CultureInfo.InvariantCulture);
                     break;
                 case "valid-after":

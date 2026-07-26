@@ -24,13 +24,20 @@ public interface IDirectorySource
 public sealed class HttpDirectorySource : IDirectorySource
 {
     private readonly IReadOnlyList<string> _endpoints;
-    private readonly TimeSpan _timeout;
+    private readonly HttpClient _http;
 
     public HttpDirectorySource(IReadOnlyList<string> dirCacheEndpoints, TimeSpan? timeout = null)
     {
         if (dirCacheEndpoints.Count == 0) throw new ArgumentException("At least one directory endpoint is required.", nameof(dirCacheEndpoints));
         _endpoints = dirCacheEndpoints;
-        _timeout = timeout ?? TimeSpan.FromSeconds(30);
+        // One shared client. No redirects — a hostile cache must not steer the fetch elsewhere. Cap the response
+        // size so a hostile cache can't OOM us before the document is even verified (real consensus ≈ a few MB).
+        _http = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })
+        {
+            Timeout = timeout ?? TimeSpan.FromSeconds(30),
+            MaxResponseContentBufferSize = 48 * 1024 * 1024,
+        };
+        _http.DefaultRequestHeaders.Add("User-Agent", "CupriTor/0.1");
     }
 
     public Task<string> FetchConsensusAsync(CancellationToken ct = default) =>
@@ -47,13 +54,10 @@ public sealed class HttpDirectorySource : IDirectorySource
 
     private async Task<string> GetWithFailoverAsync(string path, CancellationToken ct)
     {
-        using var http = new HttpClient { Timeout = _timeout };
-        http.DefaultRequestHeaders.Add("User-Agent", "CupriTor/0.1");
-
         Exception? last = null;
         foreach (string endpoint in _endpoints)
         {
-            try { return await http.GetStringAsync($"http://{endpoint}{path}", ct).ConfigureAwait(false); }
+            try { return await _http.GetStringAsync($"http://{endpoint}{path}", ct).ConfigureAwait(false); }
             catch (Exception e) when (e is not OperationCanceledException) { last = e; }
         }
         throw new InvalidOperationException($"All directory endpoints failed for {path}.", last);
