@@ -2,9 +2,11 @@
 
 All notable changes to CupriTor are recorded here. This project adheres to [Semantic Versioning](https://semver.org).
 
-## 0.1.0 — unreleased
+## 0.1.0
 
 First feature-complete release: a 100%-managed Tor client, v3 onion service, exit-capable dialer, and SOCKS5 proxy.
+Live-validated end to end against the real Tor network (onion client, onion service, exit — over the default managed
+TLS transport). 175 tests.
 
 ### Client (use Tor)
 - `TorClient` — bootstraps and **verifies** the microdescriptor consensus against the 9 hard-coded directory
