@@ -38,6 +38,10 @@ node, PHP, etc. The app binds to loopback; the sidecar is its front door(s).
 Every source overrides the previous: `appsettings.json` → environment variables (`CupriTor__Mode=TorOnly`) →
 command line (`--CupriTor:Mode=TorOnly`).
 
+> **⚠️ `Both` mode is dual-bind.** Serving identical content on clearnet and an onion at once can let an observer
+> link the two identities. If that matters, don't serve identical content on both. See the
+> [threat model](../../docs/THREAT-MODEL.md) — and note CupriTor gives *network* anonymity, not *browser* anonymity.
+
 ## Outbound SOCKS5 proxy
 
 Independently of `Mode`, the sidecar can run a local **SOCKS5** proxy — a managed Tor SOCKS port any app can use:

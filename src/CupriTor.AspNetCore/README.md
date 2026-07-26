@@ -87,5 +87,8 @@ Tor Browser's `onion-auth`).
   never delays your clearnet endpoints; the onion simply starts accepting once its descriptor is live. It then
   self-heals (replacing dead intro points, re-publishing) for as long as the app runs.
 - **Cross-platform.** Windows, Linux, macOS, containers — it's the same managed transport everywhere.
+- **⚠️ Dual-bind correlation.** Serving the *same content* on clearnet **and** the onion can let an observer link
+  the onion to your clearnet identity (identical bytes / `Server`/`Date` headers / TLS cert / timing). If those
+  identities must stay unlinkable, don't dual-bind identical content. See the [threat model](../../docs/THREAT-MODEL.md).
 
 See [`samples/OnionWebApp`](../../samples/OnionWebApp) for a runnable dual-bound app.

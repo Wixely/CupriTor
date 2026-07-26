@@ -27,12 +27,13 @@ Legend: ✅ done · 🔜 planned/requested · 💤 deferred · 🔬 investigate/
    Connected). The console samples subscribe and print a live progress line. Follow-up: finer per-onion-connect phases
    (fetch-descriptor / rendezvous / introduce) would need threading a reporter into `OnionConnector`.
 
-4. 🔬 **Tor-Browser-style mitigations — decide scope.**
-   Most Tor Browser hardening is **browser/content-layer** (canvas, WebGL, fonts, UA, screen size, timezone) and
-   does **not** apply to a library — there's no DOM/device. What *does* apply is network/protocol fingerprinting
-   (see Anonymity/hardening below). Deliverable: a decision + a threat-model doc stating clearly that CupriTor
-   provides **network-layer anonymity, not application/browser anonymity** (so integrators don't get a false sense
-   of security), plus the dual-bind onion↔clearnet correlation warning.
+4. ✅ **Tor-Browser-style mitigations — decision + threat-model doc.** Written up in
+   **[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)** + a short **SECURITY.md**, with dual-bind warnings added to the
+   AspNetCore/Host READMEs. Decision: browser/content-layer mitigations are **out of scope** (no browser); the
+   in-scope network-layer items are **TLS ClientHello fingerprint** (priority, for censored networks), a
+   **stream-isolation policy**, and **traffic-analysis padding** — all deferred and tracked below. Headline caveat
+   stated everywhere: **network-layer anonymity, not application/browser anonymity**, plus the onion↔clearnet
+   dual-bind correlation warning.
 
 5. 🔜 **Whole-system code review.**
    A comprehensive pass to surface issues across correctness, security/anonymity, concurrency, resource lifetime,
