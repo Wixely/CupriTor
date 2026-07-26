@@ -21,11 +21,11 @@ Legend: ✅ done · 🔜 planned/requested · 💤 deferred · 🔬 investigate/
    authorities must measure/vote it in) vs **CupriNet peer-relay** (self-contained mesh, you own the trust —
    the tractable, on-mission one).
 
-3. 🔜 **Async connection / bootstrap status (for loading bars).**
-   An observable status stream so a UI can render progress for every element of connecting: bootstrap phases
-   (fetching consensus → verifying signatures → priming guards → building circuit hop k/n → ready) and per-connect
-   phases (onion: fetch descriptor → rendezvous → introduce → stream; exit: select exit → build → begin → stream).
-   Shape: a structured `TorStatus`/progress model surfaced via `IProgress<T>` / event / `IAsyncEnumerable<T>`.
+3. ✅ **Async connection / bootstrap status (for loading bars).** `TorClient.StatusChanged` event + `CurrentStatus`
+   property emit a `TorStatus(TorPhase, Message, Progress 0..1)`. Bootstrap is richly instrumented (FetchingConsensus →
+   VerifyingConsensus → LoadingGuards → Bootstrapped, moving %); connect is coarse (BuildingCircuit → Connecting →
+   Connected). The console samples subscribe and print a live progress line. Follow-up: finer per-onion-connect phases
+   (fetch-descriptor / rendezvous / introduce) would need threading a reporter into `OnionConnector`.
 
 4. 🔬 **Tor-Browser-style mitigations — decide scope.**
    Most Tor Browser hardening is **browser/content-layer** (canvas, WebGL, fonts, UA, screen size, timezone) and

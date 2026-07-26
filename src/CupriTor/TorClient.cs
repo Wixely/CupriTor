@@ -38,6 +38,22 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// <summary>True once a verified consensus has been loaded and guards are primed.</summary>
     public bool IsBootstrapped => _network is not null;
 
+    /// <summary>The most recent status update (see <see cref="StatusChanged"/>).</summary>
+    public TorStatus CurrentStatus { get; private set; } = new(TorPhase.Idle, "Idle", 0);
+
+    /// <summary>
+    /// Raised on every phase change during bootstrap and connection — subscribe to drive a progress UI / loading bar.
+    /// Handlers should be quick and not throw (exceptions are swallowed so a bad handler can't disrupt Tor operations).
+    /// </summary>
+    public event EventHandler<TorStatus>? StatusChanged;
+
+    private void Report(TorPhase phase, string message, double progress)
+    {
+        var status = new TorStatus(phase, message, progress);
+        CurrentStatus = status;
+        try { StatusChanged?.Invoke(this, status); } catch { /* a faulty handler must not break Tor operations */ }
+    }
+
     /// <summary>
     /// Bootstrap: fetch and verify the consensus, then prime the entry-guard set. Must be called before
     /// building circuits. Requires <see cref="TorClientOptions.DirectorySource"/> to be set.
@@ -47,17 +63,29 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         if (_options.DirectorySource is null)
             throw new TorBootstrapException("TorClientOptions.DirectorySource must be set before StartAsync.");
 
-        Consensus consensus = await FetchVerifiedConsensusAsync(_options.DirectorySource, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
-        var guards = new EntryGuardManager(_options.StateStore, _random, _options.GuardCount);
-        _network = new TorNetwork(consensus, guards, _options.DirectorySource, _options.Transport, _random, _options.Timeout);
+        try
+        {
+            Consensus consensus = await FetchVerifiedConsensusAsync(_options.DirectorySource, DateTimeOffset.UtcNow, reportProgress: true, ct).ConfigureAwait(false);
+            Report(TorPhase.LoadingGuards, "Priming entry guards…", 0.85);
+            var guards = new EntryGuardManager(_options.StateStore, _random, _options.GuardCount);
+            _network = new TorNetwork(consensus, guards, _options.DirectorySource, _options.Transport, _random, _options.Timeout);
 
-        if (_options.AutoRefreshConsensus)
-            _refreshLoop ??= Task.Run(() => RefreshConsensusLoopAsync(_shutdown.Token));
+            if (_options.AutoRefreshConsensus)
+                _refreshLoop ??= Task.Run(() => RefreshConsensusLoopAsync(_shutdown.Token));
+
+            Report(TorPhase.Bootstrapped, "Connected to the Tor network.", 1.0);
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            Report(TorPhase.Failed, $"Bootstrap failed: {e.Message}", CurrentStatus.Progress);
+            throw;
+        }
     }
 
     /// <summary>Fetch the microdescriptor consensus and authority keys, and verify the consensus against the hard-coded authorities.</summary>
-    private static async Task<Consensus> FetchVerifiedConsensusAsync(IDirectorySource dir, DateTimeOffset now, CancellationToken ct)
+    private async Task<Consensus> FetchVerifiedConsensusAsync(IDirectorySource dir, DateTimeOffset now, bool reportProgress, CancellationToken ct)
     {
+        if (reportProgress) Report(TorPhase.FetchingConsensus, "Fetching the network consensus…", 0.15);
         string consensusText, keysText;
         try
         {
@@ -69,6 +97,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             throw new TorBootstrapException("Failed to fetch directory documents.", e);
         }
 
+        if (reportProgress) Report(TorPhase.VerifyingConsensus, "Verifying authority signatures…", 0.6);
         if (!Consensus.TryParse(consensusText, out Consensus? consensus) || consensus is null)
             throw new TorBootstrapException("Could not parse the consensus.");
 
@@ -106,7 +135,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             {
                 try
                 {
-                    Consensus fresh = await FetchVerifiedConsensusAsync(_options.DirectorySource!, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+                    Consensus fresh = await FetchVerifiedConsensusAsync(_options.DirectorySource!, DateTimeOffset.UtcNow, reportProgress: false, ct).ConfigureAwait(false);
                     _network?.UpdateConsensus(fresh);
                     break;
                 }
@@ -166,8 +195,11 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(_options.Timeout);
 
+        Report(TorPhase.BuildingCircuit, $"Connecting to onion service {onion}…", 0.3);
         var connector = new OnionConnector(network);
-        return await connector.ConnectAsync(address, port, timeout.Token).ConfigureAwait(false);
+        Stream stream = await connector.ConnectAsync(address, port, timeout.Token).ConfigureAwait(false);
+        Report(TorPhase.Connected, $"Connected to {onion}.", 1.0);
+        return stream;
     }
 
     /// <summary>
@@ -202,6 +234,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(_options.Timeout);
 
+            Report(TorPhase.BuildingCircuit, $"Building an exit circuit to {host}:{port}…", 0.3);
             OrConnection conn;
             Circuit circuit;
             try { (conn, circuit) = await network.BuildExitCircuitAsync(port, middleCount: 1, DateTimeOffset.UtcNow, timeout.Token).ConfigureAwait(false); }
@@ -209,7 +242,9 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
 
             try
             {
+                Report(TorPhase.Connecting, $"Opening a stream to {host}:{port} via the exit…", 0.7);
                 TorStream stream = await circuit.ConnectAsync($"{host}:{port}", RelayBeginFlags.IPv6Okay, timeout.Token).ConfigureAwait(false);
+                Report(TorPhase.Connected, $"Connected to {host}:{port}.", 1.0);
                 return new CircuitOwningStream(stream, circuit, conn);
             }
             catch (StreamRejectedException e) when (IsRetryableExitFailure(e.Reason))

@@ -28,6 +28,7 @@ Console.WriteLine($"Target: {url}\n");
 try
 {
     await using var tor = new TorClient(new TorClientOptions { DirectorySource = new HttpDirectorySource(directoryCaches) });
+    tor.StatusChanged += (_, s) => Console.WriteLine($"  [{s.Progress,4:P0}] {s.Message}"); // live progress → loading bar
 
     Console.WriteLine("Bootstrapping Tor (fetching + verifying the consensus)…");
     await tor.StartAsync();
