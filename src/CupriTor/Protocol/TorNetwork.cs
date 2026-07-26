@@ -5,6 +5,9 @@ using CupriTor.Transport;
 
 namespace CupriTor.Protocol;
 
+/// <summary>Signals that a selected path has two hops in the same declared relay family; the caller should reselect.</summary>
+internal sealed class FamilyConflictException(string message) : Exception(message);
+
 /// <summary>
 /// The client's operational view of the network: a verified microdescriptor consensus, the entry-guard
 /// set, and the machinery to resolve per-hop ntor keys and build circuits. Owns circuit-id allocation.
@@ -48,18 +51,26 @@ internal sealed class TorNetwork
     public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitAsync(int length, DateTimeOffset now, CancellationToken ct)
     {
         if (length < 1) throw new ArgumentOutOfRangeException(nameof(length));
-        (GuardEntry guard, RouterStatusEntry[] path) = SelectPath(length - 1, forcedFinalHop: null, now);
-        return BuildOverPathAsync(guard, path, now, ct);
+        return SelectAndBuildAsync(length - 1, forcedFinalHop: null, now, ct);
     }
 
     /// <summary>
     /// Build a circuit whose final hop is a specific relay (e.g. a chosen HSDir or introduction point),
     /// with an entry guard and <paramref name="middleCount"/> random middles before it.
     /// </summary>
-    public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitToAsync(RouterStatusEntry finalHop, int middleCount, DateTimeOffset now, CancellationToken ct)
+    public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitToAsync(RouterStatusEntry finalHop, int middleCount, DateTimeOffset now, CancellationToken ct) =>
+        SelectAndBuildAsync(middleCount, forcedFinalHop: finalHop, now, ct);
+
+    /// <summary>Select a path and build it, reselecting up to a few times if the path is rejected for a family conflict.</summary>
+    private async Task<(OrConnection Connection, Circuit Circuit)> SelectAndBuildAsync(
+        int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now, CancellationToken ct, Func<Circuit, Task>? beforeStart = null)
     {
-        (GuardEntry guard, RouterStatusEntry[] path) = SelectPath(middleCount, forcedFinalHop: finalHop, now);
-        return BuildOverPathAsync(guard, path, now, ct);
+        for (int attempt = 0; ; attempt++)
+        {
+            (GuardEntry guard, RouterStatusEntry[] path) = SelectPath(middleCount, forcedFinalHop, now);
+            try { return await BuildOverPathAsync(guard, path, now, ct, beforeStart).ConfigureAwait(false); }
+            catch (FamilyConflictException) when (attempt < 3) { /* reselect and retry */ }
+        }
     }
 
     /// <summary>
@@ -104,7 +115,8 @@ internal sealed class TorNetwork
             var path = new RouterStatusEntry[guardAndMiddles.Length + 1];
             guardAndMiddles.CopyTo(path, 0);
             path[^1] = exit;
-            return await BuildOverPathAsync(selection.Guard, path, now, ct).ConfigureAwait(false);
+            try { return await BuildOverPathAsync(selection.Guard, path, now, ct).ConfigureAwait(false); }
+            catch (FamilyConflictException e) { last = e; continue; } // this exit shares a family with an earlier hop — try another
         }
 
         throw new InvalidOperationException(
@@ -117,6 +129,29 @@ internal sealed class TorNetwork
             if (PathSelector.SameSlash16(r.Address, o.Address)) return true;
         return false;
     }
+
+    /// <summary>Reject a path that has two hops in the same declared family (mutual — each must list the other).</summary>
+    private static void EnsureFamilyDistinct(RouterStatusEntry[] path, IReadOnlyDictionary<string, Microdescriptor> mds)
+    {
+        for (int i = 0; i < path.Length; i++)
+        {
+            Microdescriptor mdI = mds[Convert.ToHexString(path[i].RsaIdentityDigest)];
+            for (int j = i + 1; j < path.Length; j++)
+            {
+                Microdescriptor mdJ = mds[Convert.ToHexString(path[j].RsaIdentityDigest)];
+                if (InSameFamily(path[i], mdI, path[j], mdJ))
+                    throw new FamilyConflictException($"Hops {path[i].Nickname} and {path[j].Nickname} are in the same family.");
+            }
+        }
+    }
+
+    /// <summary>Two relays are family iff EACH lists the other in its "family" line (path-spec: mutual).</summary>
+    internal static bool InSameFamily(RouterStatusEntry a, Microdescriptor mdA, RouterStatusEntry b, Microdescriptor mdB) =>
+        FamilyLists(mdA.Family, b) && FamilyLists(mdB.Family, a);
+
+    private static bool FamilyLists(IReadOnlySet<string> family, RouterStatusEntry r) =>
+        family.Count != 0 &&
+        (family.Contains("$" + Convert.ToHexString(r.RsaIdentityDigest)) || family.Contains(r.Nickname.ToLowerInvariant()));
 
     /// <summary>Select the entry guard (hop 0), <paramref name="middleCount"/> random middles, and an optional forced final hop.</summary>
     private (GuardEntry Guard, RouterStatusEntry[] Path) SelectPath(int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now)
@@ -156,8 +191,7 @@ internal sealed class TorNetwork
     public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitToIntroAsync(
         IReadOnlyList<LinkSpecifier> introSpecifiers, byte[] introNtorKey, int middleCount, DateTimeOffset now, CancellationToken ct)
     {
-        (GuardEntry guard, RouterStatusEntry[] path) = SelectPath(middleCount, forcedFinalHop: null, now);
-        return BuildOverPathAsync(guard, path, now, ct, circuit => circuit.ExtendToAsync(introSpecifiers, introNtorKey, ct));
+        return SelectAndBuildAsync(middleCount, forcedFinalHop: null, now, ct, circuit => circuit.ExtendToAsync(introSpecifiers, introNtorKey, ct));
     }
 
     /// <summary>Pick a random relay carrying the required flags (bandwidth-weighted), e.g. a rendezvous point.</summary>
@@ -178,6 +212,7 @@ internal sealed class TorNetwork
         GuardEntry guard, RouterStatusEntry[] path, DateTimeOffset now, CancellationToken ct, Func<Circuit, Task>? beforeStart = null)
     {
         Dictionary<string, Microdescriptor> mds = await ResolveMicrodescriptorsAsync(path, ct).ConfigureAwait(false);
+        EnsureFamilyDistinct(path, mds); // now that we have each hop's family list, reject same-family paths (→ reselect)
 
         RelayHopInfo HopFor(RouterStatusEntry r)
         {

@@ -7,10 +7,9 @@ namespace CupriTor.Protocol;
 /// <summary>
 /// Bandwidth-weighted circuit path selection (path-spec) honouring the anonymity constraints: every
 /// relay must be Running and Valid, each hop's required flags must be present (e.g. Guard for the
-/// entry), and no two hops may share a /16 subnet. Relay-<b>family</b> distinctness is supported when a
-/// family map is supplied, but CupriTor does not yet source family data from microdescriptors, so it is
-/// <b>not currently enforced</b> (tracked in ROADMAP — do not rely on family separation yet). Exit
-/// selection layers on top of this (see <see cref="TorNetwork"/>), reusing the weighting and /16 helpers.
+/// entry), and no two hops may share a /16 subnet. Relay-<b>family</b> distinctness is enforced by
+/// <see cref="TorNetwork"/> <i>after</i> selection (it needs each hop's microdescriptor family list, which
+/// isn't available at selection time), reselecting on a conflict. Exit selection also layers on top of this.
 /// </summary>
 internal static class PathSelector
 {

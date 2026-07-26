@@ -57,14 +57,18 @@ forced-final-hop path distinctness (HSDir/intro/rendezvous now kept distinct —
 SOCKS5 handshake timeout + concurrency cap (anti-Slowloris); secure-by-default (warn on a non-loopback / open SOCKS
 proxy). Family-distinctness doc corrected to not over-promise.
 
-**Remaining review items (tracked):**
-- 🔜 **Relay-family distinctness** — NOT currently enforced (family data isn't sourced from microdescriptors). Needs a
-  post-selection family check (or an all-microdescriptor download). Anonymity-relevant.
-- 💤 INTRODUCE2 replay cache; `_pendingControl` per-command queue (dropped-introduction race under load); authenticated (v1) SENDME.
-- 💤 Bound inbound buffering (`TorStream` channel, AspNetCore accept channel, per-BEGIN fan-out); cap directory/descriptor HTTP reads; disable redirect-follow; shared `HttpClient`.
-- 💤 `TryParse` hardening (malformed consensus/descriptor must not throw past the catch); consensus-method floor; `dir-key-published` not-yet-valid cert check.
-- 💤 EntryGuards locking under concurrent builds + stale-guard pruning; snapshot consensus per build; `_hops` immutable-snapshot on the receive path.
-- 💤 Link-cert `CertType`/`KeyType` assertion; secret-key zeroing; BouncyCastle TLS cancellation; reverse-proxy half-close truncation; clearnet front-door concurrency cap.
+**Review items — FIXED (medium batches A/B/C):**
+- ✅ **Relay-family distinctness** — parse the microdescriptor `family` line; mutual-family check across the fetched
+  path hops; reselect on conflict (batch C).
+- ✅ INTRODUCE2 replay cache; `_pendingControl` → per-command buffered channel (no dropped introductions); `_hops` → lock-free volatile snapshot.
+- ✅ Bounded inbound buffering (`TorStream` + AspNetCore accept channel); capped directory HTTP reads; redirect-follow disabled; shared `HttpClient`.
+- ✅ `TryParse` hardening (malformed consensus/descriptor can't crash a parser); consensus-method arg guard.
+- ✅ EntryGuards locking; per-build consensus snapshot; link-cert `CertType`/`KeyType` assertion; BouncyCastle TLS cancellation; `TorClient.DisposeAsync` idempotency.
+
+**Review items — still tracked:**
+- 💤 Authenticated (v1) SENDME; consensus-method floor + `dir-key-published` not-yet-valid cert check; stale-guard pruning.
+- 💤 Secret-key zeroing; revision-counter rollback check; clearnet front-door concurrency cap.
+- 💤 Reverse-proxy half-close truncation for full-duplex protocols (needs `Socket.Shutdown`, not a generic Stream pump — WhenAll deadlocks HTTP, so left as WhenAny).
 
 ## Capabilities
 
