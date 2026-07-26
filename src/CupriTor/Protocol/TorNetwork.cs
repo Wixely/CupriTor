@@ -126,15 +126,24 @@ internal sealed class TorNetwork
         var perHop = new List<IReadOnlyCollection<string>>();
         for (int i = 0; i < middleCount; i++) perHop.Add(new[] { "Fast" });
 
-        if (!PathSelector.TryExtendPath(Consensus.Routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] selected))
+        if (forcedFinalHop is null)
+        {
+            if (!PathSelector.TryExtendPath(Consensus.Routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] selected))
+                throw new InvalidOperationException("Could not select a circuit path from the consensus.");
+            return (selection.Guard, selected);
+        }
+
+        // Forced final hop (HSDir / intro / rendezvous): choose middles distinct (relay + /16) from BOTH the guard
+        // and the final hop, so no relay appears twice and no two hops share a /16 — the exit path already does this.
+        if (!PathSelector.TryExtendPath(Consensus.Routers, new[] { selection.Router, forcedFinalHop }, perHop, _random, out RouterStatusEntry[] withBoth))
             throw new InvalidOperationException("Could not select a circuit path from the consensus.");
 
-        if (forcedFinalHop is null) return (selection.Guard, selected);
-
-        var withFinal = new RouterStatusEntry[selected.Length + 1];
-        selected.CopyTo(withFinal, 0);
-        withFinal[^1] = forcedFinalHop;
-        return (selection.Guard, withFinal);
+        // withBoth = [guard, finalHop, middle0, middle1, …] → reorder to [guard, middle0, …, finalHop].
+        var path = new RouterStatusEntry[withBoth.Length];
+        path[0] = selection.Router;
+        for (int i = 0; i < middleCount; i++) path[1 + i] = withBoth[2 + i];
+        path[^1] = forcedFinalHop;
+        return (selection.Guard, path);
     }
 
     /// <summary>

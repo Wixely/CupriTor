@@ -29,6 +29,7 @@ public sealed class Socks5ProxyServer : IAsyncDisposable
     private TcpListener? _listener;
     private CancellationTokenSource? _linked;
     private Task? _acceptLoop;
+    private SemaphoreSlim? _slots;
 
     public Socks5ProxyServer(ITorDialer dialer, Socks5ProxyOptions? options = null, Action<string>? trace = null)
     {
@@ -44,6 +45,7 @@ public sealed class Socks5ProxyServer : IAsyncDisposable
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         if (_listener is not null) throw new InvalidOperationException("Already started.");
+        _slots = _options.MaxConcurrentConnections > 0 ? new SemaphoreSlim(_options.MaxConcurrentConnections) : null;
         _listener = new TcpListener(_options.Bind);
         _listener.Start();
         ListenEndPoint = (IPEndPoint)_listener.LocalEndpoint;
@@ -62,55 +64,73 @@ public sealed class Socks5ProxyServer : IAsyncDisposable
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
             catch (SocketException) { break; }
+
+            if (_slots is not null && !_slots.Wait(0))
+            {
+                _trace?.Invoke("connection limit reached; dropping client");
+                client.Dispose();
+                continue;
+            }
             _ = HandleClientAsync(client, ct);
         }
     }
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
     {
-        using (client)
+        try
         {
-            client.NoDelay = true;
-            NetworkStream stream = client.GetStream();
-            Stream? upstream = null;
-            try
+            using (client)
             {
-                if (!await NegotiateAsync(stream, ct).ConfigureAwait(false)) return;
-
-                (string host, int port, Socks5Reply parse) = await ReadRequestAsync(stream, ct).ConfigureAwait(false);
-                if (parse != Socks5Reply.Succeeded)
-                {
-                    await ReplyAsync(stream, parse, ct).ConfigureAwait(false);
-                    return;
-                }
-
+                client.NoDelay = true;
+                NetworkStream stream = client.GetStream();
+                Stream? upstream = null;
                 try
                 {
-                    upstream = await _dialer.ConnectAsync(host, port, ct).ConfigureAwait(false);
-                }
-                catch (NotSupportedException)
-                {
-                    _trace?.Invoke($"dialer declined {host}:{port}");
-                    await ReplyAsync(stream, Socks5Reply.NetworkUnreachable, ct).ConfigureAwait(false);
-                    return;
-                }
-                catch (Exception e)
-                {
-                    _trace?.Invoke($"dial {host}:{port} failed: {e.Message}");
-                    await ReplyAsync(stream, Socks5Reply.HostUnreachable, ct).ConfigureAwait(false);
-                    return;
-                }
+                    string host;
+                    int port;
+                    Socks5Reply parse;
+                    // Bound the greeting + CONNECT phase so a client that connects and stalls can't pin a slot (Slowloris).
+                    using (var handshake = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                    {
+                        handshake.CancelAfter(_options.HandshakeTimeout);
+                        if (!await NegotiateAsync(stream, handshake.Token).ConfigureAwait(false)) return;
+                        (host, port, parse) = await ReadRequestAsync(stream, handshake.Token).ConfigureAwait(false);
+                    }
+                    if (parse != Socks5Reply.Succeeded)
+                    {
+                        await ReplyAsync(stream, parse, ct).ConfigureAwait(false);
+                        return;
+                    }
 
-                await ReplyAsync(stream, Socks5Reply.Succeeded, ct).ConfigureAwait(false);
-                _trace?.Invoke($"tunnel established → {host}:{port}");
-                await OnionReverseProxy.PumpAsync(stream, upstream, ct).ConfigureAwait(false);
-            }
-            catch (Exception) { /* client/link error mid-handshake — just drop the connection */ }
-            finally
-            {
-                if (upstream is not null) await upstream.DisposeAsync().ConfigureAwait(false);
+                    try
+                    {
+                        upstream = await _dialer.ConnectAsync(host, port, ct).ConfigureAwait(false);
+                    }
+                    catch (NotSupportedException)
+                    {
+                        _trace?.Invoke($"dialer declined {host}:{port}");
+                        await ReplyAsync(stream, Socks5Reply.NetworkUnreachable, ct).ConfigureAwait(false);
+                        return;
+                    }
+                    catch (Exception e)
+                    {
+                        _trace?.Invoke($"dial {host}:{port} failed: {e.Message}");
+                        await ReplyAsync(stream, Socks5Reply.HostUnreachable, ct).ConfigureAwait(false);
+                        return;
+                    }
+
+                    await ReplyAsync(stream, Socks5Reply.Succeeded, ct).ConfigureAwait(false);
+                    _trace?.Invoke($"tunnel established → {host}:{port}");
+                    await OnionReverseProxy.PumpAsync(stream, upstream, ct).ConfigureAwait(false);
+                }
+                catch (Exception) { /* client/link error — just drop the connection */ }
+                finally
+                {
+                    if (upstream is not null) await upstream.DisposeAsync().ConfigureAwait(false);
+                }
             }
         }
+        finally { _slots?.Release(); }
     }
 
     /// <summary>Method negotiation: accept NO-AUTH (0x00), otherwise reject with 0xFF.</summary>
@@ -192,6 +212,7 @@ public sealed class Socks5ProxyServer : IAsyncDisposable
     {
         await StopAsync().ConfigureAwait(false);
         _linked?.Dispose();
+        _slots?.Dispose();
         _cts.Dispose();
     }
 

@@ -103,6 +103,9 @@ public sealed class OnionHostService : BackgroundService
     {
         (string host, int port) = _config.Socks5Endpoint();
         IPAddress addr = host is "0.0.0.0" or "*" ? IPAddress.Any : IPAddress.Parse(host);
+        if (!IPAddress.IsLoopback(addr))
+            _log.LogWarning("SOCKS5 proxy bound to NON-LOOPBACK {Bind} — this is an OPEN, UNAUTHENTICATED Tor proxy that anyone who can reach it can use. Bind to 127.0.0.1 unless you truly intend this.", $"{host}:{port}");
+
         _socks = new Socks5ProxyServer(_tor!, new Socks5ProxyOptions { Bind = new IPEndPoint(addr, port) },
             msg => _log.LogDebug("[socks5] {Message}", msg));
         await _socks.StartAsync(ct).ConfigureAwait(false);

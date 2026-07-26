@@ -46,6 +46,26 @@ Legend: ✅ done · 🔜 planned/requested · 💤 deferred · 🔬 investigate/
    API design, and spec-conformance. Best done as a structured multi-perspective review (per-subsystem, with
    adversarial verification of findings).
 
+## Code review (2026-07-26)
+
+Whole-system review done (6 parallel subsystem reviewers + verification against the code). **No crypto/trust
+breaks** — consensus verification, TLS→link binding, MACs/signatures, ntor, and HS crypto all verified sound.
+
+**High findings — FIXED:** circuit-lifetime leaks (`OrConnection` now disposes the circuits it opens; idempotent
+`Circuit.DisposeAsync`; `HsService` tracks/reaps served rendezvous circuits — was an unbounded per-connection leak);
+forced-final-hop path distinctness (HSDir/intro/rendezvous now kept distinct — relay + /16 — from guard+middles);
+SOCKS5 handshake timeout + concurrency cap (anti-Slowloris); secure-by-default (warn on a non-loopback / open SOCKS
+proxy). Family-distinctness doc corrected to not over-promise.
+
+**Remaining review items (tracked):**
+- 🔜 **Relay-family distinctness** — NOT currently enforced (family data isn't sourced from microdescriptors). Needs a
+  post-selection family check (or an all-microdescriptor download). Anonymity-relevant.
+- 💤 INTRODUCE2 replay cache; `_pendingControl` per-command queue (dropped-introduction race under load); authenticated (v1) SENDME.
+- 💤 Bound inbound buffering (`TorStream` channel, AspNetCore accept channel, per-BEGIN fan-out); cap directory/descriptor HTTP reads; disable redirect-follow; shared `HttpClient`.
+- 💤 `TryParse` hardening (malformed consensus/descriptor must not throw past the catch); consensus-method floor; `dir-key-published` not-yet-valid cert check.
+- 💤 EntryGuards locking under concurrent builds + stale-guard pruning; snapshot consensus per build; `_hops` immutable-snapshot on the receive path.
+- 💤 Link-cert `CertType`/`KeyType` assertion; secret-key zeroing; BouncyCastle TLS cancellation; reverse-proxy half-close truncation; clearnet front-door concurrency cap.
+
 ## Capabilities
 
 - 💤 **Relay/node** — see requested #2 (opt-in only).

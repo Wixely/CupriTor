@@ -11,4 +11,10 @@ public sealed class Socks5ProxyOptions
     /// to bind an ephemeral port (read the actual one from <see cref="Socks5ProxyServer.ListenEndPoint"/>).
     /// </summary>
     public IPEndPoint Bind { get; set; } = new(IPAddress.Loopback, 9050);
+
+    /// <summary>How long a client has to complete the SOCKS5 greeting + CONNECT before it is dropped (anti-Slowloris). Default 10s.</summary>
+    public TimeSpan HandshakeTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Maximum concurrent client connections; once reached, new connections are accepted and immediately closed. Default 512.</summary>
+    public int MaxConcurrentConnections { get; set; } = 512;
 }

@@ -11,6 +11,7 @@ namespace CupriTor.Protocol;
 internal sealed class OrConnection : IAsyncDisposable
 {
     private readonly ITlsConnection _tls;
+    private readonly List<Circuit> _circuits = new();
 
     public Stream Stream => _tls.Stream;
     public CellCodec Codec { get; }
@@ -53,7 +54,22 @@ internal sealed class OrConnection : IAsyncDisposable
     }
 
     /// <summary>Create a new circuit over this connection with the given circuit id (client-chosen, high bit set).</summary>
-    public Circuit CreateCircuit(uint circuitId) => new(Stream, Codec, circuitId);
+    public Circuit CreateCircuit(uint circuitId)
+    {
+        var circuit = new Circuit(Stream, Codec, circuitId);
+        lock (_circuits) _circuits.Add(circuit);
+        return circuit;
+    }
 
-    public ValueTask DisposeAsync() => _tls.DisposeAsync();
+    /// <summary>Dispose the circuits opened over this connection (cancels their receive loops), then the TLS session.</summary>
+    public async ValueTask DisposeAsync()
+    {
+        List<Circuit> circuits;
+        lock (_circuits) { circuits = new List<Circuit>(_circuits); _circuits.Clear(); }
+        foreach (Circuit c in circuits)
+        {
+            try { await c.DisposeAsync().ConfigureAwait(false); } catch { /* best effort */ }
+        }
+        await _tls.DisposeAsync().ConfigureAwait(false);
+    }
 }

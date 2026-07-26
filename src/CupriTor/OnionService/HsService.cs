@@ -29,6 +29,8 @@ internal sealed class HsService
     // Reactor state (set in StartAsync, used by the supervisor).
     private readonly List<IntroPoint> _intros = new();
     private readonly object _introLock = new();
+    private readonly List<(OrConnection Conn, Circuit Circuit)> _rendezvous = new(); // live served-client circuits
+    private readonly object _rendLock = new();
     private Ed25519ExpandedKey _identityKey;
     private byte[] _identityPub = Array.Empty<byte>();
     private int _periodLength = HsTimePeriod.DefaultLengthMinutes;
@@ -158,6 +160,7 @@ internal sealed class HsService
 
             try
             {
+                await ReapRendezvousAsync().ConfigureAwait(false);
                 bool changed = await EnsureIntroPointsAsync(ct).ConfigureAwait(false);
                 if (changed || DateTimeOffset.UtcNow - _lastPublish >= RepublishInterval)
                     await PublishOnceAsync(ct).ConfigureAwait(false);
@@ -210,6 +213,13 @@ internal sealed class HsService
         foreach (IntroPoint ip in snapshot)
         {
             try { await ip.Connection.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
+
+        List<(OrConnection Conn, Circuit Circuit)> rends;
+        lock (_rendLock) { rends = _rendezvous.ToList(); _rendezvous.Clear(); }
+        foreach ((OrConnection conn, _) in rends)
+        {
+            try { await conn.DisposeAsync().ConfigureAwait(false); } catch { }
         }
         _cts?.Dispose();
     }
@@ -331,6 +341,8 @@ internal sealed class HsService
 
     private async Task HandleIntroduce2Async(IntroPoint ip, RelayCell introduce2, OnionStreamHandler onAccept, CancellationToken ct)
     {
+        OrConnection? rpConn = null;
+        bool tracked = false;
         try
         {
             // The client used one of our active period descriptors; try each subcredential until one decrypts.
@@ -349,8 +361,9 @@ internal sealed class HsService
                 HsNtor.ServiceRendezvous(ip.EncKeyPrivate, ip.EncKeyPublic, ip.AuthKeyPublic, req.ClientPublic);
             if (rend is null) { _trace?.Invoke("hs-ntor ServiceRendezvous failed"); return; }
 
-            (OrConnection rpConn, Circuit rpCircuit) = await _network.BuildCircuitToIntroAsync(
+            (OrConnection conn, Circuit rpCircuit) = await _network.BuildCircuitToIntroAsync(
                 req.RendezvousLinkSpecifiers, req.RendezvousNtorKey, _middleCount, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+            rpConn = conn;
 
             // RENDEZVOUS1 goes to the RP (normal last-hop crypto) BEFORE we splice the reversed service hop.
             byte[] handshake = HsCells.BuildRendezvousHandshake(rend.Value.ServicePublic, rend.Value.Auth);
@@ -359,11 +372,38 @@ internal sealed class HsService
 
             rpCircuit.AppendHopReversed(HsNtor.DeriveKeys(rend.Value.NtorKeySeed, RelayCrypto.KeyMaterialLengthV3Hs));
             rpCircuit.OnIncomingStream(onAccept); // now accept the client's RELAY_BEGIN
+
+            // Track the served circuit so it's disposed when it faults (client gone) or on StopAsync — not leaked.
+            lock (_rendLock) _rendezvous.Add((rpConn, rpCircuit));
+            tracked = true;
             _trace?.Invoke("rendezvous spliced; serving client");
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
             _trace?.Invoke($"introduce/rendezvous failed: {e.Message}");
+        }
+        finally
+        {
+            // If we built the rendezvous connection but never handed it off (error/cancel), dispose it (which disposes its circuit).
+            if (!tracked && rpConn is not null)
+            {
+                try { await rpConn.DisposeAsync().ConfigureAwait(false); } catch { }
+            }
+        }
+    }
+
+    /// <summary>Dispose served rendezvous circuits whose circuit has faulted (the client disconnected).</summary>
+    private async Task ReapRendezvousAsync()
+    {
+        List<(OrConnection Conn, Circuit Circuit)> dead;
+        lock (_rendLock)
+        {
+            dead = _rendezvous.Where(r => r.Circuit.IsFaulted).ToList();
+            _rendezvous.RemoveAll(r => r.Circuit.IsFaulted);
+        }
+        foreach ((OrConnection conn, _) in dead)
+        {
+            try { await conn.DisposeAsync().ConfigureAwait(false); } catch { }
         }
     }
 }

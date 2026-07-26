@@ -76,6 +76,26 @@ public class Socks5ProxyServerTests
         Assert.Equal(0x03, reply[1]); // network unreachable
     }
 
+    [Fact]
+    public async Task Idle_Client_Is_Dropped_After_The_Handshake_Timeout()
+    {
+        // A client that connects and stalls mid-handshake must be dropped, not allowed to pin a connection slot.
+        await using var proxy = new Socks5ProxyServer(new RefusingDialer(),
+            new Socks5ProxyOptions { Bind = new IPEndPoint(IPAddress.Loopback, 0), HandshakeTimeout = TimeSpan.FromMilliseconds(300) });
+        await proxy.StartAsync();
+
+        using var socks = new TcpClient();
+        await socks.ConnectAsync(proxy.ListenEndPoint);
+        NetworkStream s = socks.GetStream();
+        await s.WriteAsync(new byte[] { 0x05 }); // start the greeting, then never send the method list
+
+        var buf = new byte[1];
+        int n;
+        try { n = await s.ReadAsync(buf).AsTask().WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (IOException) { n = 0; } // a reset also means the server closed it
+        Assert.Equal(0, n); // server gave up on the stalled handshake and closed the connection
+    }
+
     private sealed class RefusingDialer : ITorDialer
     {
         public Task<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default) =>

@@ -47,6 +47,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _receiveLoop;
     private int _nextStreamId;
+    private int _disposed;
     private volatile Exception? _fault;
     private OnionStreamHandler? _incomingHandler; // service side: RELAY_BEGIN → caller-owned duplex stream
 
@@ -431,6 +432,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return; // idempotent — may be disposed via the stream and the OrConnection
         _shutdown.Cancel();
         if (_receiveLoop is not null)
         {
