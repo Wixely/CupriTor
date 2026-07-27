@@ -44,6 +44,10 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         _options = options ?? new TorClientOptions();
     }
 
+    // Vanguard scope: service circuits use them under OnionServiceOnly or All; client circuits only under All.
+    private bool VanguardsForService => _options.Vanguards is VanguardMode.OnionServiceOnly or VanguardMode.All;
+    private bool VanguardsForClient => _options.Vanguards is VanguardMode.All;
+
     /// <summary>The current verified network view, once bootstrapped (for advanced/service use).</summary>
     internal TorNetwork? Network => _network;
 
@@ -92,7 +96,10 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             Consensus consensus = await FetchVerifiedConsensusAsync(dir, DateTimeOffset.UtcNow, reportProgress: true, ct).ConfigureAwait(false);
             Report(TorPhase.LoadingGuards, "Priming entry guards…", 0.85);
             var guards = new EntryGuardManager(_options.StateStore, _random, _options.GuardCount);
-            var network = new TorNetwork(consensus, guards, dir, _options.Transport, _random, _options.Timeout);
+            VanguardManager? vanguards = _options.Vanguards != VanguardMode.Off
+                ? new VanguardManager(_options.StateStore, _random)
+                : null;
+            var network = new TorNetwork(consensus, guards, dir, _options.Transport, _random, _options.Timeout, vanguards);
             _network = network;
 
             // Download every relay's microdescriptor now (over the clearnet bootstrap source) so later circuit builds
@@ -217,7 +224,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(_options.Timeout);
 
-        var client = new HsDescriptorClient(network);
+        var client = new HsDescriptorClient(network, useVanguards: VanguardsForClient);
         OnionDescriptorResult result = await client.FetchAsync(address, timeout.Token).ConfigureAwait(false);
         return new OnionDescriptorInfo(result.IntroductionPoints.Count, result.RevisionCounter);
     }
@@ -246,7 +253,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         cts.CancelAfter(timeout);
 
         Report(TorPhase.BuildingCircuit, $"Connecting to onion service {onion}…", 0.3);
-        var connector = new OnionConnector(network);
+        var connector = new OnionConnector(network, useVanguards: VanguardsForClient);
         Stream stream = await connector.ConnectAsync(address, port, cts.Token).ConfigureAwait(false);
         Report(TorPhase.Connected, $"Connected to {onion}.", 1.0);
         return stream;
@@ -344,7 +351,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     public async Task<OnionServiceHost> PublishOnionAsync(OnionServiceKey identity, OnionStreamHandler onAccept, int introPoints = 3, IReadOnlyList<byte[]>? authorizedClients = null, CancellationToken ct = default)
     {
         TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before publishing.");
-        var service = new HsService(network, introPoints, authorizedClients: authorizedClients);
+        var service = new HsService(network, introPoints, authorizedClients: authorizedClients, useVanguards: VanguardsForService);
         return await service.StartAsync(identity, onAccept, ct).ConfigureAwait(false);
     }
 

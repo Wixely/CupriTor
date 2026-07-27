@@ -25,6 +25,7 @@ internal sealed class HsService
     private readonly int _middleCount;
     private readonly IReadOnlyList<byte[]>? _authorizedClients;
     private readonly Action<string>? _trace;
+    private readonly bool _useVanguards;
 
     // Reactor state (set in StartAsync, used by the supervisor).
     private readonly List<IntroPoint> _intros = new();
@@ -43,13 +44,14 @@ internal sealed class HsService
     private Task? _supervisor;
     private DateTimeOffset _lastPublish;
 
-    public HsService(TorNetwork network, int introCount = 3, int middleCount = 1, IReadOnlyList<byte[]>? authorizedClients = null, Action<string>? trace = null)
+    public HsService(TorNetwork network, int introCount = 3, int middleCount = 1, IReadOnlyList<byte[]>? authorizedClients = null, Action<string>? trace = null, bool useVanguards = false)
     {
         _network = network;
         _introCount = introCount;
         _middleCount = middleCount;
         _authorizedClients = authorizedClients;
         _trace = trace;
+        _useVanguards = useVanguards;
     }
 
     /// <summary>Per-intro-point state: the relay it lives on, our keys there, and the intro circuit kept open.</summary>
@@ -263,7 +265,7 @@ internal sealed class HsService
                     LinkSpecifier.FromEd25519Id(md.Ed25519Identity),
                 });
 
-                (OrConnection c, Circuit circuit) = await _network.BuildCircuitToAsync(relay, _middleCount, now, ct).ConfigureAwait(false);
+                (OrConnection c, Circuit circuit) = await _network.BuildCircuitToAsync(relay, _middleCount, now, ct, vanguards: _useVanguards).ConfigureAwait(false);
                 conn = c;
 
                 byte[] establish = HsEstablishIntro.Build(authPub, authKey, circuit.LastKh);
@@ -306,7 +308,7 @@ internal sealed class HsService
 
     private async Task<bool> UploadAsync(RouterStatusEntry hsdir, string descriptor, CancellationToken ct)
     {
-        (OrConnection conn, Circuit circuit) = await _network.BuildCircuitToAsync(hsdir, _middleCount, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+        (OrConnection conn, Circuit circuit) = await _network.BuildCircuitToAsync(hsdir, _middleCount, DateTimeOffset.UtcNow, ct, vanguards: _useVanguards).ConfigureAwait(false);
         await using (conn)
         {
             await using Stream stream = await circuit.OpenDirectoryStreamAsync(ct).ConfigureAwait(false);
@@ -375,7 +377,7 @@ internal sealed class HsService
             if (rend is null) { _trace?.Invoke("hs-ntor ServiceRendezvous failed"); return; }
 
             (OrConnection conn, Circuit rpCircuit) = await _network.BuildCircuitToIntroAsync(
-                req.RendezvousLinkSpecifiers, req.RendezvousNtorKey, _middleCount, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+                req.RendezvousLinkSpecifiers, req.RendezvousNtorKey, _middleCount, DateTimeOffset.UtcNow, ct, vanguards: _useVanguards).ConfigureAwait(false);
             rpConn = conn;
 
             // RENDEZVOUS1 goes to the RP (normal last-hop crypto) BEFORE we splice the reversed service hop.

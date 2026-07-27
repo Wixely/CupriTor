@@ -55,4 +55,23 @@ public sealed class TorClientOptions
     /// Default false — a one-time warning is emitted via <see cref="TorClient.StatusChanged"/> instead.
     /// </summary>
     public bool RequirePersistentState { get; set; }
+
+    /// <summary>
+    /// Whether to use layer-2 vanguards (guard-spec "vanguards-lite") on onion-service circuits — a small, stable,
+    /// slowly-rotating second-hop set that defends against guard-discovery attacks, at the cost of one extra hop per
+    /// onion circuit. Defaults to <see cref="VanguardMode.All"/> (client + service, matching Tor). Persisted in the
+    /// <see cref="StateStore"/> like the entry guards, so pair it with a persistent store to be effective across restarts.
+    /// </summary>
+    public VanguardMode Vanguards { get; set; } = VanguardMode.All;
+}
+
+/// <summary>Scope of layer-2 vanguard use — see <see cref="TorClientOptions.Vanguards"/>.</summary>
+public enum VanguardMode
+{
+    /// <summary>No vanguards; onion circuits use a random middle (3 hops).</summary>
+    Off,
+    /// <summary>Vanguards on onion-service (hosting) circuits only; client onion dials stay 3-hop.</summary>
+    OnionServiceOnly,
+    /// <summary>Vanguards on both client and service onion circuits (Tor's default).</summary>
+    All,
 }

@@ -2,6 +2,21 @@
 
 All notable changes to CupriTor are recorded here. This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.1.4
+
+Vanguards-lite (guard-spec / proposal 333) — guard-discovery defense for onion-service circuits.
+
+### Anonymity
+- **Layer-2 vanguards.** Onion-service circuits (both client and service — rendezvous, introduction, HSDir) now
+  route through a small, stable, slowly-rotating **layer-2 guard set** inserted as the second hop
+  (`guard → L2 → middle → destination`), so an adversary who can induce many circuits can't enumerate random
+  middles to work back toward the entry guard. Per spec: **4 vanguards**, `max(X,X)` lifetime with X uniform in
+  [1, 12] days, bandwidth-weighted + /16-distinct selection, replaced when a vanguard leaves the consensus or
+  loses Fast/Stable; persisted in the `IStateStore` like the entry guards.
+- **Behavior change:** onion circuits are now **4 hops** by default (was 3). Configure via
+  `TorClientOptions.Vanguards` — `All` (client + service, the default, matching Tor), `OnionServiceOnly`, or
+  `Off`. Exit and directory circuits are unaffected.
+
 ## 0.1.3
 
 Tunnelled directory fetches — closes the largest remaining anonymity gap (per-circuit relay selection leaking

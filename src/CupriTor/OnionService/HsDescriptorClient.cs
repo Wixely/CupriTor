@@ -24,11 +24,13 @@ internal sealed class HsDescriptorClient
 {
     private readonly TorNetwork _network;
     private readonly Action<string>? _trace;
+    private readonly bool _useVanguards;
 
-    public HsDescriptorClient(TorNetwork network, Action<string>? trace = null)
+    public HsDescriptorClient(TorNetwork network, Action<string>? trace = null, bool useVanguards = false)
     {
         _network = network;
         _trace = trace;
+        _useVanguards = useVanguards;
     }
 
     public async Task<OnionDescriptorResult> FetchAsync(OnionAddress address, CancellationToken ct)
@@ -83,7 +85,7 @@ internal sealed class HsDescriptorClient
 
     private async Task<OnionDescriptorResult?> TryFetchFromAsync(RouterStatusEntry hsdir, byte[] blinded, byte[] subcredential, CancellationToken ct)
     {
-        (OrConnection conn, Circuit circuit) = await _network.BuildCircuitToAsync(hsdir, middleCount: 1, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+        (OrConnection conn, Circuit circuit) = await _network.BuildCircuitToAsync(hsdir, middleCount: 1, DateTimeOffset.UtcNow, ct, vanguards: _useVanguards).ConfigureAwait(false);
         await using (conn)
         {
             string z = Convert.ToBase64String(blinded); // padded — confirmed live

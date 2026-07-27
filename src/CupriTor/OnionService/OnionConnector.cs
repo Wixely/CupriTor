@@ -16,18 +16,20 @@ internal sealed class OnionConnector
     private readonly TorNetwork _network;
     private readonly int _middleCount;
     private readonly Action<string>? _trace;
+    private readonly bool _useVanguards;
 
-    public OnionConnector(TorNetwork network, int middleCount = 1, Action<string>? trace = null)
+    public OnionConnector(TorNetwork network, int middleCount = 1, Action<string>? trace = null, bool useVanguards = false)
     {
         _network = network;
         _middleCount = middleCount;
         _trace = trace;
+        _useVanguards = useVanguards;
     }
 
     public async Task<Stream> ConnectAsync(OnionAddress onion, int port, CancellationToken ct)
     {
         // 1. Fetch + decrypt the descriptor → introduction points.
-        var descriptorClient = new HsDescriptorClient(_network, _trace);
+        var descriptorClient = new HsDescriptorClient(_network, _trace, _useVanguards);
         OnionDescriptorResult descriptor = await descriptorClient.FetchAsync(onion, ct).ConfigureAwait(false);
         if (descriptor.IntroductionPoints.Count == 0)
             throw new InvalidOperationException("The onion descriptor carries no introduction points.");
@@ -41,7 +43,7 @@ internal sealed class OnionConnector
         _trace?.Invoke($"rendezvous point: {rp.Nickname} {rp.Address}:{rp.OrPort}");
 
         // 3. Build the rendezvous circuit and establish the rendezvous point.
-        (OrConnection rendConn, Circuit rendCircuit) = await _network.BuildCircuitToAsync(rp, _middleCount, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+        (OrConnection rendConn, Circuit rendCircuit) = await _network.BuildCircuitToAsync(rp, _middleCount, DateTimeOffset.UtcNow, ct, vanguards: _useVanguards).ConfigureAwait(false);
         try
         {
             _trace?.Invoke("rendezvous circuit built; sending ESTABLISH_RENDEZVOUS");
@@ -94,7 +96,7 @@ internal sealed class OnionConnector
             try
             {
                 _trace?.Invoke("building intro circuit to an introduction point");
-                (introConn, introCircuit) = await _network.BuildCircuitToIntroAsync(introSpecifiers, ip.OnionKeyNtor, _middleCount, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+                (introConn, introCircuit) = await _network.BuildCircuitToIntroAsync(introSpecifiers, ip.OnionKeyNtor, _middleCount, DateTimeOffset.UtcNow, ct, vanguards: _useVanguards).ConfigureAwait(false);
 
                 HsNtor.ClientState hs = HsNtor.ClientIntroduce(ip.EncKey, ip.AuthKey, descriptor.Subcredential);
                 byte[] introduce1 = HsIntroduce.Build(hs, ip.AuthKey, cookie, rpNtorKey, rpLinkSpecifiers);

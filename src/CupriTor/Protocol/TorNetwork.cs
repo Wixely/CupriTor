@@ -20,6 +20,7 @@ internal sealed class TorNetwork
     private readonly ITlsTransport _transport;
     private readonly IRandomSource _random;
     private readonly TimeSpan _timeout;
+    private readonly VanguardManager? _vanguards; // layer-2 vanguards for onion circuits (null when disabled)
     private uint _circIdCounter;
     private volatile Consensus _consensus;
 
@@ -36,7 +37,7 @@ internal sealed class TorNetwork
     public IDirectorySource DirectorySource => _dir;
 
     public TorNetwork(Consensus consensus, EntryGuardManager guards, IDirectorySource dir,
-        ITlsTransport transport, IRandomSource random, TimeSpan timeout)
+        ITlsTransport transport, IRandomSource random, TimeSpan timeout, VanguardManager? vanguards = null)
     {
         _consensus = consensus;
         Guards = guards;
@@ -44,6 +45,7 @@ internal sealed class TorNetwork
         _transport = transport;
         _random = random;
         _timeout = timeout;
+        _vanguards = vanguards;
     }
 
     /// <summary>Atomically replace the consensus (after a fresh fetch + verification). New circuits/rings use it immediately.</summary>
@@ -75,16 +77,16 @@ internal sealed class TorNetwork
     /// Build a circuit whose final hop is a specific relay (e.g. a chosen HSDir or introduction point),
     /// with an entry guard and <paramref name="middleCount"/> random middles before it.
     /// </summary>
-    public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitToAsync(RouterStatusEntry finalHop, int middleCount, DateTimeOffset now, CancellationToken ct) =>
-        SelectAndBuildAsync(middleCount, forcedFinalHop: finalHop, now, ct);
+    public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitToAsync(RouterStatusEntry finalHop, int middleCount, DateTimeOffset now, CancellationToken ct, bool vanguards = false) =>
+        SelectAndBuildAsync(middleCount, forcedFinalHop: finalHop, now, ct, vanguards: vanguards);
 
     /// <summary>Select a path and build it, reselecting up to a few times if the path is rejected for a family conflict.</summary>
     private async Task<(OrConnection Connection, Circuit Circuit)> SelectAndBuildAsync(
-        int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now, CancellationToken ct, Func<Circuit, Task>? beforeStart = null)
+        int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now, CancellationToken ct, Func<Circuit, Task>? beforeStart = null, bool vanguards = false)
     {
         for (int attempt = 0; ; attempt++)
         {
-            (GuardEntry guard, RouterStatusEntry[] path) = SelectPath(middleCount, forcedFinalHop, now);
+            (GuardEntry guard, RouterStatusEntry[] path) = SelectPath(middleCount, forcedFinalHop, now, vanguards);
             try { return await BuildOverPathAsync(guard, path, now, ct, beforeStart).ConfigureAwait(false); }
             catch (FamilyConflictException) when (attempt < 3) { /* reselect and retry */ }
         }
@@ -170,32 +172,46 @@ internal sealed class TorNetwork
         family.Count != 0 &&
         (family.Contains("$" + Convert.ToHexString(r.RsaIdentityDigest)) || family.Contains(r.Nickname.ToLowerInvariant()));
 
-    /// <summary>Select the entry guard (hop 0), <paramref name="middleCount"/> random middles, and an optional forced final hop.</summary>
-    private (GuardEntry Guard, RouterStatusEntry[] Path) SelectPath(int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now)
+    /// <summary>
+    /// Select the entry guard (hop 0), an optional layer-2 vanguard (hop 1, when <paramref name="vanguards"/> is set
+    /// and a vanguard set is configured), <paramref name="middleCount"/> random middles, and an optional forced final hop.
+    /// </summary>
+    private (GuardEntry Guard, RouterStatusEntry[] Path) SelectPath(int middleCount, RouterStatusEntry? forcedFinalHop, DateTimeOffset now, bool vanguards)
     {
         IReadOnlyList<RouterStatusEntry> routers = Consensus.Routers; // snapshot: one consensus for the whole selection
         var selection = Guards.SelectGuard(routers, now)
             ?? throw new InvalidOperationException("No usable entry guard is available from the current consensus.");
+
+        // Fixed leading hops: the guard, plus a layer-2 vanguard when enabled (guard-discovery defense for onion
+        // circuits). If no vanguard is available, fall back to a normal middle rather than failing the build.
+        var head = new List<RouterStatusEntry> { selection.Router };
+        if (vanguards && _vanguards is not null)
+        {
+            RouterStatusEntry? layer2 = _vanguards.SelectLayer2(routers, selection.Router, now);
+            if (layer2 is not null) head.Add(layer2);
+        }
+        int headLen = head.Count;
 
         var perHop = new List<IReadOnlyCollection<string>>();
         for (int i = 0; i < middleCount; i++) perHop.Add(new[] { "Fast" });
 
         if (forcedFinalHop is null)
         {
-            if (!PathSelector.TryExtendPath(routers, new[] { selection.Router }, perHop, _random, out RouterStatusEntry[] selected))
+            if (!PathSelector.TryExtendPath(routers, head.ToArray(), perHop, _random, out RouterStatusEntry[] selected))
                 throw new InvalidOperationException("Could not select a circuit path from the consensus.");
-            return (selection.Guard, selected);
+            return (selection.Guard, selected); // [guard, (vanguard), middle…]
         }
 
-        // Forced final hop (HSDir / intro / rendezvous): choose middles distinct (relay + /16) from BOTH the guard
-        // and the final hop, so no relay appears twice and no two hops share a /16 — the exit path already does this.
-        if (!PathSelector.TryExtendPath(routers, new[] { selection.Router, forcedFinalHop }, perHop, _random, out RouterStatusEntry[] withBoth))
+        // Forced final hop (HSDir / intro / rendezvous): choose middles distinct (relay + /16 + family) from the
+        // guard, the vanguard, and the final hop — the exit path already does this.
+        var headWithFinal = new List<RouterStatusEntry>(head) { forcedFinalHop };
+        if (!PathSelector.TryExtendPath(routers, headWithFinal.ToArray(), perHop, _random, out RouterStatusEntry[] extended))
             throw new InvalidOperationException("Could not select a circuit path from the consensus.");
 
-        // withBoth = [guard, finalHop, middle0, middle1, …] → reorder to [guard, middle0, …, finalHop].
-        var path = new RouterStatusEntry[withBoth.Length];
-        path[0] = selection.Router;
-        for (int i = 0; i < middleCount; i++) path[1 + i] = withBoth[2 + i];
+        // extended = [head…, finalHop, middle0, middle1, …] → reorder to [head…, middle0, …, finalHop].
+        var path = new RouterStatusEntry[extended.Length];
+        for (int i = 0; i < headLen; i++) path[i] = head[i];
+        for (int i = 0; i < middleCount; i++) path[headLen + i] = extended[headLen + 1 + i];
         path[^1] = forcedFinalHop;
         return (selection.Guard, path);
     }
@@ -206,9 +222,9 @@ internal sealed class TorNetwork
     /// middles, then an EXTEND2 to the intro point using its raw link specifiers.
     /// </summary>
     public Task<(OrConnection Connection, Circuit Circuit)> BuildCircuitToIntroAsync(
-        IReadOnlyList<LinkSpecifier> introSpecifiers, byte[] introNtorKey, int middleCount, DateTimeOffset now, CancellationToken ct)
+        IReadOnlyList<LinkSpecifier> introSpecifiers, byte[] introNtorKey, int middleCount, DateTimeOffset now, CancellationToken ct, bool vanguards = false)
     {
-        return SelectAndBuildAsync(middleCount, forcedFinalHop: null, now, ct, circuit => circuit.ExtendToAsync(introSpecifiers, introNtorKey, ct));
+        return SelectAndBuildAsync(middleCount, forcedFinalHop: null, now, ct, circuit => circuit.ExtendToAsync(introSpecifiers, introNtorKey, ct), vanguards);
     }
 
     /// <summary>Pick a random relay carrying the required flags (bandwidth-weighted), e.g. a rendezvous point.</summary>
