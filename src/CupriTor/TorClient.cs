@@ -92,7 +92,19 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             Consensus consensus = await FetchVerifiedConsensusAsync(dir, DateTimeOffset.UtcNow, reportProgress: true, ct).ConfigureAwait(false);
             Report(TorPhase.LoadingGuards, "Priming entry guards…", 0.85);
             var guards = new EntryGuardManager(_options.StateStore, _random, _options.GuardCount);
-            _network = new TorNetwork(consensus, guards, dir, _options.Transport, _random, _options.Timeout);
+            var network = new TorNetwork(consensus, guards, dir, _options.Transport, _random, _options.Timeout);
+            _network = network;
+
+            // Download every relay's microdescriptor now (over the clearnet bootstrap source) so later circuit builds
+            // hit the cache instead of fetching per-hop descriptors over the directory channel — which is what leaks
+            // each circuit's relay selection to an on-path observer. Best-effort: misses fall back to lazy per-build fetch.
+            Report(TorPhase.LoadingGuards, "Fetching relay descriptors…", 0.9);
+            try { await network.WarmMicrodescriptorCacheAsync(dir, ct).ConfigureAwait(false); }
+            catch (Exception e) when (e is not OperationCanceledException) { /* best-effort warm */ }
+
+            // From now on, fetch directory documents over Tor circuits (BEGIN_DIR), so consensus refreshes stop
+            // signalling "Tor user" to an on-path observer. Build-time microdescriptor resolution stays cache-first.
+            _directorySource = new CircuitDirectorySource(network, dir);
 
             if (_options.AutoRefreshConsensus)
                 _refreshLoop ??= Task.Run(() => RefreshConsensusLoopAsync(_shutdown.Token));
@@ -161,6 +173,11 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
                 {
                     Consensus fresh = await FetchVerifiedConsensusAsync(_directorySource!, DateTimeOffset.UtcNow, reportProgress: false, ct).ConfigureAwait(false);
                     _network?.UpdateConsensus(fresh);
+                    // Re-warm the microdescriptor cache for the new consensus over a circuit (private), so builds keep
+                    // hitting the cache and newly-listed relays aren't fetched over clearnet on first use.
+                    if (_network is not null)
+                        try { await _network.WarmMicrodescriptorCacheAsync(_directorySource!, ct).ConfigureAwait(false); }
+                        catch (Exception e) when (e is not OperationCanceledException) { /* best-effort re-warm */ }
                     break;
                 }
                 catch (OperationCanceledException) { return; }

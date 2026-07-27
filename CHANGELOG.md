@@ -2,6 +2,24 @@
 
 All notable changes to CupriTor are recorded here. This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.1.3
+
+Tunnelled directory fetches — closes the largest remaining anonymity gap (per-circuit relay selection leaking
+over the clearnet directory channel). No breaking changes.
+
+### Anonymity
+- **Download-all microdescriptor warm at bootstrap.** After verifying the consensus, every listed relay's
+  microdescriptor is fetched once (over the clearnet bootstrap source) into the cache, so subsequent circuit
+  builds hit the cache and never fetch per-hop descriptors over the directory channel. Fetching *all* of them
+  also means an observer of the bootstrap can't infer which relays a circuit uses (including the guard).
+- **Over-circuit directory refreshes.** After bootstrap, consensus refreshes go over a Tor circuit (BEGIN_DIR
+  to a V2Dir cache) via the new internal `CircuitDirectorySource`, with a clearnet fallback — so directory
+  traffic stops signalling "Tor user" to an on-path observer on every refresh. Each refresh re-warms the cache
+  over a circuit for the new consensus.
+- Net effect: the only clearnet directory traffic is the one-time bootstrap (consensus + keys + all
+  microdescriptors), which reveals that a Tor client is bootstrapping but not its path selection. Build-time
+  microdescriptor resolution stays cache-first (clearnet only as a rare fallback for a brand-new relay).
+
 ## 0.1.2
 
 Hardening and DX for onion-only, high-fan-out transports. No breaking changes (all new members are additive).

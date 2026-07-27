@@ -319,8 +319,9 @@ internal sealed class TorNetwork
     /// digest. When <paramref name="lenient"/> is true, relays without a digest or whose descriptor can't be
     /// fetched/parsed are omitted; otherwise every router must resolve (throws if any does not).
     /// </summary>
-    private async Task<Dictionary<string, Microdescriptor>> FetchMicrodescriptorsCachedAsync(IReadOnlyList<RouterStatusEntry> routers, bool lenient, CancellationToken ct)
+    private async Task<Dictionary<string, Microdescriptor>> FetchMicrodescriptorsCachedAsync(IReadOnlyList<RouterStatusEntry> routers, bool lenient, CancellationToken ct, IDirectorySource? source = null)
     {
+        IDirectorySource dir = source ?? _dir;
         var result = new Dictionary<string, Microdescriptor>(StringComparer.Ordinal); // hex(rsa id) → md
         var need = new List<RouterStatusEntry>();
         var byMdDigest = new Dictionary<string, RouterStatusEntry>(StringComparer.Ordinal); // hex(md digest) → router (misses)
@@ -345,7 +346,7 @@ internal sealed class TorNetwork
             var digests = slice.Select(r => Convert.ToBase64String(r.MicrodescriptorSha256!).TrimEnd('=')).ToList();
 
             string text;
-            try { text = await _dir.FetchMicrodescriptorsAsync(digests, ct).ConfigureAwait(false); }
+            try { text = await dir.FetchMicrodescriptorsAsync(digests, ct).ConfigureAwait(false); }
             catch (Exception e) when (lenient && e is not OperationCanceledException) { continue; }
 
             foreach (string block in SplitMicrodescriptorBlocks(text))
@@ -368,6 +369,62 @@ internal sealed class TorNetwork
                     throw new InvalidOperationException($"Could not resolve a microdescriptor (ntor key) for {r.Nickname}.");
 
         return result;
+    }
+
+    /// <summary>
+    /// Download every currently-listed relay's microdescriptor into the cache (best-effort) using
+    /// <paramref name="source"/>. Doing this "download-all" at bootstrap over the clearnet source means later
+    /// circuit builds hit the cache (no per-build directory fetch) AND an observer of the bootstrap can't tell
+    /// which relays are selected; doing it over a circuit source refreshes the cache for a new consensus privately.
+    /// </summary>
+    public Task WarmMicrodescriptorCacheAsync(IDirectorySource source, CancellationToken ct)
+    {
+        var routers = Consensus.Routers.Where(r => r.MicrodescriptorSha256 is not null).ToList();
+        return FetchMicrodescriptorsCachedAsync(routers, lenient: true, ct, source);
+    }
+
+    /// <summary>
+    /// Fetch a directory document over a Tor circuit: build a 3-hop circuit to a V2Dir directory cache, open a
+    /// BEGIN_DIR stream, GET <paramref name="path"/>, and return the (HTTP-stripped) body. The circuit's hops are
+    /// resolved from the microdescriptor cache, so this does not re-enter directory resolution. Used for consensus
+    /// refreshes so directory traffic stops signalling "Tor user" to an on-path observer after bootstrap.
+    /// </summary>
+    public async Task<string> DirectoryGetOverCircuitAsync(string path, CancellationToken ct)
+    {
+        RouterStatusEntry relay = SelectRelay(new[] { "V2Dir", "Fast", "Running", "Valid" })
+            ?? throw new InvalidOperationException("No V2Dir directory cache is available in the consensus.");
+
+        (OrConnection conn, Circuit circuit) = await BuildCircuitToAsync(relay, middleCount: 1, DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
+        await using (conn)
+        {
+            await using Stream stream = await circuit.OpenDirectoryStreamAsync(ct).ConfigureAwait(false);
+            await stream.WriteAsync(Encoding.ASCII.GetBytes($"GET {path} HTTP/1.0\r\n\r\n"), ct).ConfigureAwait(false);
+
+            using var buf = new MemoryStream();
+            var chunk = new byte[8192];
+            const int maxBytes = 48 * 1024 * 1024; // cap: a hostile cache mustn't OOM us
+            int n;
+            while ((n = await stream.ReadAsync(chunk, ct).ConfigureAwait(false)) > 0)
+            {
+                buf.Write(chunk, 0, n);
+                if (buf.Length > maxBytes) throw new InvalidOperationException("Directory response exceeded the size cap.");
+            }
+            return ParseHttpBody(buf.ToArray());
+        }
+    }
+
+    // Strip the HTTP status line + headers (up to the first blank line) and return the body; throw on non-200.
+    internal static string ParseHttpBody(byte[] response)
+    {
+        ReadOnlySpan<byte> data = response;
+        int headerEnd = data.IndexOf("\r\n\r\n"u8);
+        if (headerEnd < 0) throw new InvalidOperationException("Malformed directory HTTP response (no header terminator).");
+        ReadOnlySpan<byte> header = data[..headerEnd];
+        int lineEnd = header.IndexOf((byte)'\n');
+        string statusLine = Encoding.ASCII.GetString(lineEnd >= 0 ? header[..lineEnd] : header).Trim();
+        if (!statusLine.Contains("200", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Directory fetch returned '{statusLine}'.");
+        return Encoding.UTF8.GetString(data[(headerEnd + 4)..]);
     }
 
     // Split concatenated microdescriptors into exact blocks (each starts at an "onion-key" line).
