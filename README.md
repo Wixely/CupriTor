@@ -66,7 +66,7 @@ dotnet nuget add source https://nuget.pkg.github.com/Wixely/index.json \
 then reference the latest package (see [Releases](https://github.com/Wixely/CupriTor/releases) for the current version):
 
 ```xml
-<PackageReference Include="CupriTor" Version="0.1.4" />
+<PackageReference Include="CupriTor" Version="0.1.5" />
 ```
 
 ## More examples
