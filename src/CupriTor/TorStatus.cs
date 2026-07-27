@@ -19,6 +19,12 @@ public enum TorPhase
     Connecting,
     Connected,
 
+    /// <summary>
+    /// Background connectivity to the Tor network was lost (a consensus refresh or an opt-in bootstrap retry failed)
+    /// and is being re-established. Recovery is signalled by a return to <see cref="Bootstrapped"/>.
+    /// </summary>
+    Reconnecting,
+
     Failed,
 }
 

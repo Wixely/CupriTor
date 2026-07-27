@@ -8,7 +8,27 @@ namespace CupriTor;
 public sealed record OnionDescriptorInfo(int IntroductionPointCount, long RevisionCounter);
 
 /// <summary>Raised when the client cannot bootstrap (fetch or verify a consensus).</summary>
-public sealed class TorBootstrapException(string message, Exception? inner = null) : Exception(message, inner);
+public class TorBootstrapException(string message, Exception? inner = null) : Exception(message, inner);
+
+/// <summary>
+/// A <see cref="TorBootstrapException"/> raised specifically when the local clock is too far outside the fetched
+/// consensus's validity window to trust it — the signatures verify, but the time doesn't. This distinguishes a wrong
+/// device clock (common on mobile/embedded/fresh installs) from a genuine signature failure. See
+/// <see cref="TorClientOptions.ClockSkewTolerance"/> to allow modest skew.
+/// </summary>
+public sealed class TorClockSkewException(DateTimeOffset localTime, DateTimeOffset consensusValidAfter, DateTimeOffset consensusValidUntil)
+    : TorBootstrapException(
+        $"The system clock appears to be wrong: local time {localTime:u} is outside the fetched consensus's validity " +
+        $"window [{consensusValidAfter:u} .. {consensusValidUntil:u}]. Tor needs an approximately-correct clock — fix the " +
+        $"device clock, or raise TorClientOptions.ClockSkewTolerance to accept the skew.")
+{
+    /// <summary>The local system time used for verification.</summary>
+    public DateTimeOffset LocalTime { get; } = localTime;
+    /// <summary>The fetched consensus's valid-after time.</summary>
+    public DateTimeOffset ConsensusValidAfter { get; } = consensusValidAfter;
+    /// <summary>The fetched consensus's valid-until time.</summary>
+    public DateTimeOffset ConsensusValidUntil { get; } = consensusValidUntil;
+}
 
 /// <summary>
 /// Thrown when a clearnet/exit destination is dialed on a client configured
@@ -76,6 +96,8 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// </summary>
     public async Task StartAsync(CancellationToken ct = default)
     {
+        if (_network is not null) return; // idempotent: already bootstrapped, and safe to re-call after a prior failure
+
         // Entry guards must persist across restarts for anonymity; the in-memory default silently loses them.
         if (_options.StateStore is InMemoryStateStore)
         {
@@ -91,6 +113,30 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         // No directory source configured? Fall back to the built-in authorities so `new TorClient()` just works.
         IDirectorySource dir = _directorySource = _options.DirectorySource ?? HttpDirectorySource.CreateDefault(_options.Timeout);
 
+        if (!_options.RetryBootstrap)
+        {
+            await BootstrapAsync(dir, ct).ConfigureAwait(false); // fail-fast (default): throws on failure
+            return;
+        }
+
+        // Opt-in daemon mode: retry with capped exponential backoff until we bootstrap or the token is cancelled.
+        for (int attempt = 0; ; attempt++)
+        {
+            try { await BootstrapAsync(dir, ct).ConfigureAwait(false); return; }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception e)
+            {
+                var wait = TimeSpan.FromSeconds(Math.Min(300, 5 * Math.Pow(2, Math.Min(attempt, 6))));
+                Report(TorPhase.Reconnecting, $"Bootstrap failed ({e.Message}); retrying in {wait.TotalSeconds:F0}s…", 0.0);
+                await Task.Delay(wait, ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    // One bootstrap attempt: fetch + verify the consensus, prime guards/vanguards, warm the cache, swap to the
+    // over-circuit directory source, and start the refresh loop. Reports Failed and rethrows if it can't complete.
+    private async Task BootstrapAsync(IDirectorySource dir, CancellationToken ct)
+    {
         try
         {
             Consensus consensus = await FetchVerifiedConsensusAsync(dir, DateTimeOffset.UtcNow, reportProgress: true, ct).ConfigureAwait(false);
@@ -150,7 +196,22 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
                 certs.Add(cert);
 
         if (!ConsensusVerifier.Verify(consensus, certs, DirectoryAuthorities.DefaultFingerprints, now, out int validSignatures))
-            throw new TorBootstrapException($"Consensus signature verification failed ({validSignatures} valid signatures).");
+        {
+            // Distinguish a genuine signature failure from a local clock outside the consensus's validity window:
+            // re-verify as of the consensus's own valid-after (when the authorities signed it). If the signatures are
+            // sound then, only the clock is wrong — report that clearly, honouring ClockSkewTolerance.
+            if (ConsensusVerifier.Verify(consensus, certs, DirectoryAuthorities.DefaultFingerprints, consensus.ValidAfter, out _))
+            {
+                TimeSpan tol = _options.ClockSkewTolerance;
+                if (now < consensus.ValidAfter - tol || now >= consensus.ValidUntil + tol)
+                    throw new TorClockSkewException(now, consensus.ValidAfter, consensus.ValidUntil);
+                // else: skew is within the configured tolerance — accept this consensus.
+            }
+            else
+            {
+                throw new TorBootstrapException($"Consensus signature verification failed ({validSignatures} valid signatures).");
+            }
+        }
 
         return consensus;
     }
@@ -161,6 +222,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// </summary>
     private async Task RefreshConsensusLoopAsync(CancellationToken ct)
     {
+        bool degraded = false; // whether a Reconnecting episode was reported (so we only signal on transitions)
         while (!ct.IsCancellationRequested)
         {
             TorNetwork? network = _network;
@@ -170,6 +232,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             TimeSpan wait = validUntil - now - TimeSpan.FromMinutes(45);
             if (wait < TimeSpan.FromMinutes(5)) wait = TimeSpan.FromMinutes(5);
             if (wait > TimeSpan.FromHours(2)) wait = TimeSpan.FromHours(2);
+            if (degraded && wait > TimeSpan.FromSeconds(60)) wait = TimeSpan.FromSeconds(60); // poll faster while reconnecting
 
             try { await Task.Delay(wait, ct).ConfigureAwait(false); }
             catch (OperationCanceledException) { break; }
@@ -185,11 +248,13 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
                     if (_network is not null)
                         try { await _network.WarmMicrodescriptorCacheAsync(_directorySource!, ct).ConfigureAwait(false); }
                         catch (Exception e) when (e is not OperationCanceledException) { /* best-effort re-warm */ }
+                    if (degraded) { degraded = false; Report(TorPhase.Bootstrapped, "Reconnected to the Tor network.", 1.0); }
                     break;
                 }
                 catch (OperationCanceledException) { return; }
-                catch
+                catch (Exception e)
                 {
+                    if (!degraded) { degraded = true; Report(TorPhase.Reconnecting, $"Lost connectivity to the Tor network; reconnecting… ({e.Message})", CurrentStatus.Progress); }
                     try { await Task.Delay(TimeSpan.FromMinutes(2 * (attempt + 1)), ct).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
                 }
@@ -299,6 +364,8 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     {
         if (_options.OnionOnly) throw new ClearnetBlockedException(host);
         TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before connecting.");
+        // An IPv6-literal destination must exit over IPv6, so select an exit whose IPv6 ("p6") policy permits the port.
+        bool ipv6 = System.Net.IPAddress.TryParse(host, out System.Net.IPAddress? ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
         const int maxAttempts = 3;
         Exception? last = null;
 
@@ -310,7 +377,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             Report(TorPhase.BuildingCircuit, $"Building an exit circuit to {host}:{port}…", 0.3);
             OrConnection conn;
             Circuit circuit;
-            try { (conn, circuit) = await network.BuildExitCircuitAsync(port, middleCount: 1, DateTimeOffset.UtcNow, cts.Token).ConfigureAwait(false); }
+            try { (conn, circuit) = await network.BuildExitCircuitAsync(port, middleCount: 1, DateTimeOffset.UtcNow, cts.Token, ipv6).ConfigureAwait(false); }
             catch (Exception e) when (e is not OperationCanceledException) { last = e; continue; }
 
             try

@@ -13,7 +13,13 @@ public sealed class TorClientOptions
     /// </summary>
     public ITlsTransport Transport { get; set; } = new BouncyCastleTlsTransport();
 
-    /// <summary>Persistence for entry guards and other client state. Defaults to in-memory (non-persistent).</summary>
+    /// <summary>
+    /// Persistence for the client's anonymity-critical state. Two opaque byte blobs are written: the entry-guard set
+    /// and the layer-2 vanguard set (see <see cref="Vanguards"/>). Both MUST survive restarts — losing them
+    /// reselects guards/vanguards on every run, which is a deanonymization risk. Defaults to in-memory
+    /// (non-persistent); supply a durable store (<c>FileStateStore</c>, or your own encrypted implementation) for
+    /// production. A custom store only needs to persist opaque key→bytes pairs.
+    /// </summary>
     public IStateStore StateStore { get; set; } = new InMemoryStateStore();
 
     /// <summary>
@@ -63,6 +69,24 @@ public sealed class TorClientOptions
     /// <see cref="StateStore"/> like the entry guards, so pair it with a persistent store to be effective across restarts.
     /// </summary>
     public VanguardMode Vanguards { get; set; } = VanguardMode.All;
+
+    /// <summary>
+    /// How far the local clock may be outside a fetched consensus's validity window and still be accepted. Tor is
+    /// time-sensitive; a wrong device clock (common on mobile/embedded/fresh installs) otherwise fails bootstrap.
+    /// When the clock is off by more than this, <see cref="TorClient.StartAsync"/> throws a
+    /// <see cref="TorClockSkewException"/> (reporting the local and consensus times) instead of an opaque
+    /// verification error. Default <see cref="TimeSpan.Zero"/> — strict (accept only within the window) but with the
+    /// clear error; raise it (e.g. a couple of hours) to tolerate skew, at the cost of trusting a slightly stale consensus.
+    /// </summary>
+    public TimeSpan ClockSkewTolerance { get; set; } = TimeSpan.Zero;
+
+    /// <summary>
+    /// When true, <see cref="TorClient.StartAsync"/> retries bootstrap with capped exponential backoff (emitting
+    /// <see cref="TorPhase.Reconnecting"/>) until it succeeds or the token is cancelled — for daemon-style consumers
+    /// that should come up whenever connectivity arrives. Default false: bootstrap fails fast (throws) so errors are
+    /// surfaced. Either way, <c>StartAsync</c> is safe to call again after a failure (it is idempotent).
+    /// </summary>
+    public bool RetryBootstrap { get; set; }
 }
 
 /// <summary>Scope of layer-2 vanguard use — see <see cref="TorClientOptions.Vanguards"/>.</summary>

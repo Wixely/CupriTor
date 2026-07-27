@@ -98,7 +98,7 @@ internal sealed class TorNetwork
     /// kept distinct (relay + /16) from the earlier hops; each candidate's microdescriptor exit-policy summary is
     /// checked against the port before it is chosen (the summary lives only in the microdescriptor, not the consensus).
     /// </summary>
-    public async Task<(OrConnection Connection, Circuit Circuit)> BuildExitCircuitAsync(int port, int middleCount, DateTimeOffset now, CancellationToken ct)
+    public async Task<(OrConnection Connection, Circuit Circuit)> BuildExitCircuitAsync(int port, int middleCount, DateTimeOffset now, CancellationToken ct, bool ipv6 = false)
     {
         const int maxExitProbes = 8;
         IReadOnlyList<RouterStatusEntry> routers = Consensus.Routers; // snapshot: one consensus for the whole selection
@@ -129,7 +129,7 @@ internal sealed class TorNetwork
             try { md = await ResolveMicrodescriptorAsync(exit, ct).ConfigureAwait(false); }
             catch (Exception e) when (e is not OperationCanceledException) { last = e; continue; }
 
-            if (!md.ExitPolicyIPv4.Allows(port)) continue;
+            if (!(ipv6 ? md.ExitPolicyIPv6 : md.ExitPolicyIPv4).Allows(port)) continue; // check the policy for the destination's family
 
             var path = new RouterStatusEntry[guardAndMiddles.Length + 1];
             guardAndMiddles.CopyTo(path, 0);

@@ -2,6 +2,26 @@
 
 All notable changes to CupriTor are recorded here. This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.1.5
+
+Reliability and clear-error hygiene for long-running / embedded consumers. No breaking changes (all additive).
+
+### Reliability
+- **Clear clock-skew error.** A device clock too far outside a fetched consensus's validity window now throws
+  `TorClockSkewException` (reporting local vs consensus time) instead of an opaque "signature verification failed" —
+  the common failure on mobile/embedded/fresh installs. `TorClientOptions.ClockSkewTolerance` (default 0) accepts
+  modest skew.
+- **Connectivity events.** The background refresh now emits `StatusChanged` `Reconnecting` when it loses the network
+  and `Bootstrapped` again on recovery (polling faster while reconnecting), so a long-running app can surface
+  "reconnecting / recovered".
+- **Re-callable + opt-in retrying bootstrap.** `StartAsync` is now idempotent and safe to call again after a failure;
+  `TorClientOptions.RetryBootstrap` (default off) makes it retry with backoff until connectivity arrives, for
+  daemon-style consumers. The default stays fail-fast (throws).
+
+### Correctness
+- **Exit selection honours the IPv6 (`p6`) exit policy** for IPv6-literal destinations, not only the IPv4 (`p`)
+  summary — parsed from the microdescriptor.
+
 ## 0.1.4
 
 Vanguards-lite (guard-spec / proposal 333) — guard-discovery defense for onion-service circuits.

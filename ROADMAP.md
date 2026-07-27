@@ -71,12 +71,22 @@ proxy). Family-distinctness doc corrected to not over-promise.
 - 💤 **Relay/node** — see requested #2 (opt-in only).
 - 💤 **Client connect to PRIVATE onions** — authorized-client auth on the connect path. Cookie-recovery logic
   already exists in a test; not wired into `ConnectToOnionAsync`.
-- 💤 **IPv6 exit** (`p6` policy + IPv6 `RELAY_CONNECTED`) and **`RELAY_RESOLVE`** (DNS-only). IPv4 clearnet works.
+- 🔜 **Full IPv6 reach (priority — flagged by an integrating consumer).** Effectively IPv4-only today: the client
+  connects to relays via the primary IPv4 OR address and bootstraps from IPv4 authority literals, so it **won't
+  bootstrap or build circuits on an IPv6-only network** (increasingly common on mobile carriers / some cloud). Needs:
+  use `ExtraOrAddresses` (IPv6) for OR connections, IPv6 directory mirrors, an IPv6/dual-stack preference option, and
+  IPv6-aware relay diversity. Bigger lift. (Exit-side `p6` policy check: ✅ 0.1.5; IPv6 `RELAY_CONNECTED` /
+  `RELAY_RESOLVE` still pending.)
 - ✅ **Exit (clearnet) support** — done, live-validated (example.com 200, check.torproject.org 301).
 
 ## Observability / DX
 
-- 🔜 **Connection status / progress** — requested #3.
+- 🔜 **Connection status / progress** — requested #3. *(Connectivity drop/recovery events via `StatusChanged`
+  `Reconnecting`→`Bootstrapped`, re-callable `StartAsync` + opt-in `RetryBootstrap`, and a clear `TorClockSkewException`:
+  ✅ 0.1.5.)*
+- 💤 **Optional concurrent-dial cap** — `ConnectToOnionAsync` has no built-in limit (each dial = one TLS socket to a
+  guard), so a consumer with unbounded concurrency can exhaust sockets; ties to OR-connection multiplexing. Provide an
+  optional limiter or clearer "self-limit" guidance. Low priority.
 
 ## Anonymity / hardening
 

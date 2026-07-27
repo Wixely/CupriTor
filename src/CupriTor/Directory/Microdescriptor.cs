@@ -16,6 +16,9 @@ internal sealed class Microdescriptor
     /// <summary>The relay's IPv4 exit-policy summary (the "p" line). Rejects everything when the line is absent.</summary>
     public ExitPolicySummary ExitPolicyIPv4 { get; private init; } = ExitPolicySummary.RejectAll;
 
+    /// <summary>The relay's IPv6 exit-policy summary (the "p6" line). Rejects everything when the line is absent.</summary>
+    public ExitPolicySummary ExitPolicyIPv6 { get; private init; } = ExitPolicySummary.RejectAll;
+
     private static readonly IReadOnlySet<string> EmptyFamily = new HashSet<string>();
 
     /// <summary>
@@ -51,6 +54,7 @@ internal sealed class Microdescriptor
             byte[]? ntor = null;
             byte[]? ed = null;
             ExitPolicySummary policy = ExitPolicySummary.RejectAll;
+            ExitPolicySummary policyV6 = ExitPolicySummary.RejectAll;
             HashSet<string>? family = null;
 
             foreach (DirectoryItem item in items)
@@ -76,6 +80,10 @@ internal sealed class Microdescriptor
                         if (item.Arguments.Length >= 2)
                             policy = ExitPolicySummary.Parse(item.Arguments[0], item.Arguments[1]);
                         break;
+                    case "p6": // IPv6 exit-policy summary
+                        if (item.Arguments.Length >= 2)
+                            policyV6 = ExitPolicySummary.Parse(item.Arguments[0], item.Arguments[1]);
+                        break;
                 }
             }
 
@@ -88,6 +96,7 @@ internal sealed class Microdescriptor
                 NtorOnionKey = ntor,
                 Ed25519Identity = ed,
                 ExitPolicyIPv4 = policy,
+                ExitPolicyIPv6 = policyV6,
                 Family = family ?? EmptyFamily,
             };
             return true;
