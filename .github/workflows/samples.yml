@@ -53,6 +53,7 @@ jobs:
               -p:DebugType=None -p:DebugSymbols=false \
               -o "out/$name"
             cp "samples/$name/README.md" "out/$name/" 2>/dev/null || true
+            cp LICENSE THIRD-PARTY-NOTICES.md "out/$name/" 2>/dev/null || true
           done
 
       - name: Zip per sample
