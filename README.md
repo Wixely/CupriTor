@@ -35,13 +35,39 @@ consumer.
 
 ## Install
 
-Packages publish to **GitHub Packages** (`nuget.pkg.github.com/Wixely`):
+Packages are published to **GitHub Packages** (`nuget.pkg.github.com/Wixely`):
 
 | Package | Purpose |
 |---|---|
 | `CupriTor` | The core library (client, onion service, exit, SOCKS5, HttpClient). |
 | `CupriTor.AspNetCore` | Host ASP.NET Core apps on an onion, in-process. |
 | `CupriTor.Host` | The cross-platform sidecar (`dotnet tool install --global CupriTor.Host`). |
+
+GitHub Packages requires authentication even for public packages, so a consumer needs the feed configured plus a
+GitHub token with `read:packages`. Add the source to your solution's `nuget.config` — **credentials are supplied out
+of band, never committed:**
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <add key="wixely-github" value="https://nuget.pkg.github.com/Wixely/index.json" />
+  </packageSources>
+</configuration>
+```
+
+Supply the token via your machine or CI (it lands in the user-level NuGet config, not the repo):
+
+```bash
+dotnet nuget add source https://nuget.pkg.github.com/Wixely/index.json \
+  --name wixely-github --username <your-github-user> --password <PAT-with-read:packages> --store-password-in-clear-text
+```
+
+then reference the latest package (see [Releases](https://github.com/Wixely/CupriTor/releases) for the current version):
+
+```xml
+<PackageReference Include="CupriTor" Version="0.1.4" />
+```
 
 ## More examples
 
