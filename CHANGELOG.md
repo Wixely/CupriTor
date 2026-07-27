@@ -2,6 +2,14 @@
 
 All notable changes to CupriTor are recorded here. This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.1.1
+
+Licensing and packaging only — no code or API changes; the library is identical to 0.1.0.
+
+- Add a repository `LICENSE` (MIT) and `THIRD-PARTY-NOTICES.md` attributing the redistributed
+  dependencies (BouncyCastle, CupriCurve, and the .NET runtime bundled into the sample apps).
+- The self-contained sample bundles now include `LICENSE` and `THIRD-PARTY-NOTICES.md`.
+
 ## 0.1.0
 
 First feature-complete release: a 100%-managed Tor client, v3 onion service, exit-capable dialer, and SOCKS5 proxy.
