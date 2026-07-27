@@ -27,6 +27,10 @@ and hosting onion services), where you control the client and can avoid applicat
 - **No local DNS leaks** — clearnet names are resolved **at the exit** (the SOCKS server expects remote-DNS,
   i.e. `--socks5-hostname`).
 - **Onion-service crypto** — v3 descriptors, hs-ntor, client authorization (private onions), all byte-exact with Tor.
+- **Guard-discovery defense (onion services)** — layer-2 vanguards (guard-spec "vanguards-lite"): onion circuits
+  route through a small, stable, slowly-rotating second-hop set (`guard → L2 → middle → destination`) so an
+  adversary who induces many circuits can't enumerate random middles to work back toward the entry guard. On by
+  default for client + service onion circuits (`TorClientOptions.Vanguards`).
 
 ## What CupriTor does NOT protect (out of scope — the caller's responsibility)
 
