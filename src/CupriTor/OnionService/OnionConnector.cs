@@ -27,7 +27,7 @@ internal sealed class OnionConnector
     public async Task<Stream> ConnectAsync(OnionAddress onion, int port, CancellationToken ct)
     {
         // 1. Fetch + decrypt the descriptor → introduction points.
-        var descriptorClient = new HsDescriptorClient(_network);
+        var descriptorClient = new HsDescriptorClient(_network, _trace);
         OnionDescriptorResult descriptor = await descriptorClient.FetchAsync(onion, ct).ConfigureAwait(false);
         if (descriptor.IntroductionPoints.Count == 0)
             throw new InvalidOperationException("The onion descriptor carries no introduction points.");

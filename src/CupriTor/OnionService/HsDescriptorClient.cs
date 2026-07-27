@@ -23,16 +23,29 @@ internal sealed record OnionDescriptorResult(
 internal sealed class HsDescriptorClient
 {
     private readonly TorNetwork _network;
+    private readonly Action<string>? _trace;
 
-    public HsDescriptorClient(TorNetwork network) => _network = network;
+    public HsDescriptorClient(TorNetwork network, Action<string>? trace = null)
+    {
+        _network = network;
+        _trace = trace;
+    }
 
     public async Task<OnionDescriptorResult> FetchAsync(OnionAddress address, CancellationToken ct)
     {
         byte[] identity = address.PublicKey.ToArray();
         int len = HsTimePeriod.DefaultLengthMinutes;
         long tp = HsTimePeriod.Number(DateTimeOffset.UtcNow, len);
-        byte[] srv = _network.Consensus.SharedRandomCurrentValue
+
+        // The current time period is paired with the SRV that was current when that period BEGAN. In the afternoon
+        // window [12:00-24:00) UTC that's the current SRV; in the morning window [00:00-12:00) the SRV rotated at
+        // 00:00 while the period began at the previous noon, so the current descriptor uses the PREVIOUS SRV. Using
+        // the wrong SRV computes the wrong HSDir ring and every responsible HSDir returns 404. This mirrors the
+        // service's two-period publish (HsService.ComputePeriods).
+        Consensus consensus = _network.Consensus;
+        byte[] cur = consensus.SharedRandomCurrentValue
             ?? throw new InvalidOperationException("Consensus has no shared-random value; cannot compute the HSDir ring.");
+        byte[] srv = HsTimePeriod.IsBetweenTpAndSrv(consensus.ValidAfter) ? cur : (consensus.SharedRandomPreviousValue ?? cur);
 
         var blinded = new byte[32];
         if (!HsBlinding.TryBlindPublicKey(identity, tp, len, blinded))
@@ -46,18 +59,23 @@ internal sealed class HsDescriptorClient
         byte[] EdOf(RouterStatusEntry r) => edById[Convert.ToHexString(r.RsaIdentityDigest)];
         List<RouterStatusEntry> responsible = HsDirRing.Responsible(
             hsdirs, EdOf, blinded, srv, tp, len, HsDirRing.DefaultReplicas, HsDirRing.DefaultSpreadFetch);
+        _trace?.Invoke($"tp={tp}, {hsdirs.Count} HSDirs in ring, {responsible.Count} responsible; blinded={Convert.ToHexString(blinded)[..16]}… srv={Convert.ToHexString(srv)[..16]}…");
 
         Exception? last = null;
+        int attempt = 0;
         foreach (RouterStatusEntry hsdir in responsible)
         {
+            attempt++;
             try
             {
+                _trace?.Invoke($"[{attempt}/{responsible.Count}] HSDir {hsdir.Nickname} {hsdir.Address}:{hsdir.OrPort} — building circuit + fetching");
                 OnionDescriptorResult? result = await TryFetchFromAsync(hsdir, blinded, subcredential, ct).ConfigureAwait(false);
-                if (result is not null) return result;
+                if (result is not null) { _trace?.Invoke($"[{attempt}] descriptor OK ({result.IntroductionPoints.Count} intro points)"); return result; }
             }
             catch (Exception e) when (e is not OperationCanceledException)
             {
                 last = e;
+                _trace?.Invoke($"[{attempt}] error: {e.GetType().Name}: {e.Message}");
             }
         }
         throw new InvalidOperationException("No responsible HSDir served a valid descriptor.", last);
@@ -70,27 +88,28 @@ internal sealed class HsDescriptorClient
         {
             string z = Convert.ToBase64String(blinded); // padded — confirmed live
             byte[] response = await DirFetchAsync(circuit, $"/tor/hs/3/{z}", ct).ConfigureAwait(false);
-            if (response.Length == 0) return null;
+            if (response.Length == 0) { _trace?.Invoke("  empty response"); return null; }
 
             string text = Encoding.ASCII.GetString(response);
             int firstLineEnd = text.IndexOf('\n');
             string statusLine = firstLineEnd >= 0 ? text[..firstLineEnd] : text;
+            _trace?.Invoke($"  HTTP: {statusLine.Trim()} ({response.Length} bytes)");
             if (!statusLine.Contains("200")) return null;
 
             int headerEnd = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
             string descriptorText = headerEnd >= 0 ? text[(headerEnd + 4)..] : text;
 
-            if (!HsDescriptor.TryParse(descriptorText, out HsDescriptorView view)) return null;
-            if (!view.TryVerify(blinded, out byte[] signingKey)) return null;
+            if (!HsDescriptor.TryParse(descriptorText, out HsDescriptorView view)) { _trace?.Invoke("  descriptor parse FAILED"); return null; }
+            if (!view.TryVerify(blinded, out byte[] signingKey)) { _trace?.Invoke("  signature verify FAILED"); return null; }
 
             byte[] secretInput = HsLayerCrypto.SecretInput(blinded, subcredential, view.RevisionCounter);
             if (!HsLayerCrypto.TryDecrypt(view.SuperencryptedBlob.Span, secretInput, HsLayerCrypto.SuperencryptedConstant, out byte[] superPlain))
-                return null;
+            { _trace?.Invoke("  superencrypted-layer decrypt FAILED"); return null; }
             if (!HsSuperencryptedLayer.TryExtractInner(superPlain, out byte[] innerBlob) ||
                 !HsLayerCrypto.TryDecrypt(innerBlob, secretInput, HsLayerCrypto.EncryptedConstant, out byte[] innerPlain))
-                return null;
+            { _trace?.Invoke("  inner-layer decrypt FAILED"); return null; }
             if (!HsInnerLayer.TryParse(innerPlain, out List<IntroductionPoint> intros))
-                return null;
+            { _trace?.Invoke("  intro-point parse FAILED"); return null; }
 
             return new OnionDescriptorResult(blinded, subcredential, view.RevisionCounter, signingKey, intros);
         }

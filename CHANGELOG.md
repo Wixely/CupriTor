@@ -25,6 +25,11 @@ over the clearnet directory channel). No breaking changes.
   cells (matching the receive loop and tor-spec) instead of failing — a relay with connection padding can send a
   keepalive mid-handshake, which previously aborted the build. Surfaced live by the long over-circuit consensus
   transfer; hardens every circuit build (onion + exit included).
+- **Onion descriptor lookup fixed in the morning UTC window.** The client computed the HSDir ring with the current
+  shared-random value unconditionally; in the `[00:00–12:00)` UTC window the current time period pairs with the
+  *previous* SRV (now selected via `IsBetweenTpAndSrv`, mirroring the service's two-period publish). Previously,
+  onion lookups in that window fetched from the wrong HSDirs and got a 404 from every one — a pre-existing latent
+  bug that made onion connect fail all morning and succeed in the afternoon.
 
 ## 0.1.2
 
