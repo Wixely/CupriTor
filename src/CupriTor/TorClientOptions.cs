@@ -87,6 +87,17 @@ public sealed class TorClientOptions
     /// surfaced. Either way, <c>StartAsync</c> is safe to call again after a failure (it is idempotent).
     /// </summary>
     public bool RetryBootstrap { get; set; }
+
+    /// <summary>
+    /// Maximum number of concurrent outbound dials, or 0 for unlimited (the default). Each
+    /// <see cref="TorClient.ConnectToOnionAsync(string,int,System.Threading.CancellationToken)"/> /
+    /// <see cref="TorClient.ConnectViaExitAsync(string,int,System.Threading.CancellationToken)"/> builds a fresh
+    /// circuit — one TLS socket to an entry guard — so a high-fan-out consumer (e.g. a P2P node dialing many peers at
+    /// once) can exhaust sockets / file descriptors. Set a cap and any excess dials wait for a free slot instead of
+    /// opening unbounded connections; the wait is bounded by the per-call timeout and the cancellation token. This is
+    /// purely a throttle — it does not change how an individual dial behaves once it starts.
+    /// </summary>
+    public int MaxConcurrentDials { get; set; }
 }
 
 /// <summary>Scope of layer-2 vanguard use — see <see cref="TorClientOptions.Vanguards"/>.</summary>

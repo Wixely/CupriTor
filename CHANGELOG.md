@@ -2,6 +2,18 @@
 
 All notable changes to CupriTor are recorded here. This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.1.6
+
+Throttling for high-fan-out consumers. No breaking changes (additive; default behaviour unchanged).
+
+### Reliability / DX
+- **Optional concurrent-dial cap.** `TorClientOptions.MaxConcurrentDials` (default 0 = unlimited) bounds how many
+  outbound dials run at once. Each `ConnectToOnionAsync` / `ConnectViaExitAsync` builds a fresh circuit — one TLS
+  socket to an entry guard — so a consumer dialing many peers concurrently (e.g. a P2P node) could exhaust sockets /
+  file descriptors. With a cap set, the excess dials wait for a free slot (bounded by the per-call timeout and the
+  cancellation token) instead of opening unbounded connections. Purely a throttle — an individual dial's behaviour is
+  unchanged. Answers the "no built-in dial limit → self-limit" note raised by an integrating consumer.
+
 ## 0.1.5
 
 Reliability and clear-error hygiene for long-running / embedded consumers. No breaking changes (all additive).

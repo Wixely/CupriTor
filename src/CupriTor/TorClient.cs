@@ -54,6 +54,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     private readonly TorClientOptions _options;
     private readonly IRandomSource _random = SecureRandomSource.Instance;
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly DialGate _dialGate; // caps concurrent dials (unlimited when MaxConcurrentDials == 0)
     private TorNetwork? _network;
     private Task? _refreshLoop;
     private IDirectorySource? _directorySource; // resolved at StartAsync (options' source, or the built-in default)
@@ -62,6 +63,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     public TorClient(TorClientOptions? options = null)
     {
         _options = options ?? new TorClientOptions();
+        _dialGate = new DialGate(_options.MaxConcurrentDials);
     }
 
     // Vanguard scope: service circuits use them under OnionServiceOnly or All; client circuits only under All.
@@ -317,6 +319,8 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
 
+        // Throttle concurrent dials (no-op unless MaxConcurrentDials is set); the wait counts toward the timeout.
+        using IDisposable slot = await _dialGate.AcquireAsync(cts.Token).ConfigureAwait(false);
         Report(TorPhase.BuildingCircuit, $"Connecting to onion service {onion}…", 0.3);
         var connector = new OnionConnector(network, useVanguards: VanguardsForClient);
         Stream stream = await connector.ConnectAsync(address, port, cts.Token).ConfigureAwait(false);
@@ -368,6 +372,12 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         bool ipv6 = System.Net.IPAddress.TryParse(host, out System.Net.IPAddress? ip) && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
         const int maxAttempts = 3;
         Exception? last = null;
+
+        // Throttle concurrent dials (no-op unless MaxConcurrentDials is set): one slot held across the exit-retry
+        // attempts, since each attempt opens a fresh socket to a guard. The wait is bounded by the per-call timeout.
+        using var gateCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        gateCts.CancelAfter(timeout);
+        using IDisposable slot = await _dialGate.AcquireAsync(gateCts.Token).ConfigureAwait(false);
 
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
@@ -439,6 +449,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
             try { await _refreshLoop.ConfigureAwait(false); } catch { /* shutdown */ }
         }
         _shutdown.Dispose();
+        _dialGate.Dispose();
     }
 
     private static IEnumerable<string> SplitCertificates(string text)

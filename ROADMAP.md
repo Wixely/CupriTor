@@ -84,9 +84,10 @@ proxy). Family-distinctness doc corrected to not over-promise.
 - 🔜 **Connection status / progress** — requested #3. *(Connectivity drop/recovery events via `StatusChanged`
   `Reconnecting`→`Bootstrapped`, re-callable `StartAsync` + opt-in `RetryBootstrap`, and a clear `TorClockSkewException`:
   ✅ 0.1.5.)*
-- 💤 **Optional concurrent-dial cap** — `ConnectToOnionAsync` has no built-in limit (each dial = one TLS socket to a
-  guard), so a consumer with unbounded concurrency can exhaust sockets; ties to OR-connection multiplexing. Provide an
-  optional limiter or clearer "self-limit" guidance. Low priority.
+- ✅ **Optional concurrent-dial cap** — `TorClientOptions.MaxConcurrentDials` (default 0 = unlimited) caps in-flight
+  dials; the excess wait for a free slot (bounded by the per-call timeout + cancellation) rather than exhausting
+  sockets / file descriptors (0.1.6). The deeper **OR-connection multiplexing** (sharing one socket per guard across
+  circuits, instead of one socket per dial) remains 💤.
 
 ## Anonymity / hardening
 
