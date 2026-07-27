@@ -11,6 +11,17 @@ public sealed record OnionDescriptorInfo(int IntroductionPointCount, long Revisi
 public sealed class TorBootstrapException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
+/// Thrown when a clearnet/exit destination is dialed on a client configured
+/// <see cref="TorClientOptions.OnionOnly"/> — so an onion-only transport can never silently leave Tor via an exit.
+/// </summary>
+public sealed class ClearnetBlockedException(string host)
+    : InvalidOperationException($"Clearnet destination '{host}' is blocked: this TorClient is configured OnionOnly.")
+{
+    /// <summary>The clearnet host that was refused.</summary>
+    public string Host { get; } = host;
+}
+
+/// <summary>
 /// The entry point to CupriTor: bootstraps a verified view of the Tor network from a directory source,
 /// maintains entry guards, and builds circuits. Onion-service connect/publish build on top of this.
 ///
@@ -61,6 +72,18 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// </summary>
     public async Task StartAsync(CancellationToken ct = default)
     {
+        // Entry guards must persist across restarts for anonymity; the in-memory default silently loses them.
+        if (_options.StateStore is InMemoryStateStore)
+        {
+            if (_options.RequirePersistentState)
+                throw new InvalidOperationException(
+                    "RequirePersistentState is set but StateStore is the in-memory default, which loses entry guards on " +
+                    "restart (an anonymity risk). Supply a persistent IStateStore (e.g. new FileStateStore(path)).");
+            Report(TorPhase.Idle,
+                "Warning: entry guards are stored in memory and reset on restart — supply a persistent IStateStore " +
+                "(e.g. FileStateStore) for stable guards.", 0.0);
+        }
+
         // No directory source configured? Fall back to the built-in authorities so `new TorClient()` just works.
         IDirectorySource dir = _directorySource = _options.DirectorySource ?? HttpDirectorySource.CreateDefault(_options.Timeout);
 
@@ -170,9 +193,9 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// </summary>
     public async Task<OnionDescriptorInfo> LookupOnionAsync(string onion, CancellationToken ct = default)
     {
-        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before onion lookups.");
         if (!OnionAddress.TryParse(onion, out OnionAddress address))
-            throw new ArgumentException($"Not a valid v3 .onion address: {onion}", nameof(onion));
+            throw new InvalidOnionAddressException(onion);
+        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before onion lookups.");
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(_options.Timeout);
@@ -187,18 +210,27 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// fetch the descriptor, establish a rendezvous point, INTRODUCE1 to an introduction point, complete
     /// the hs-ntor rendezvous, and open an application stream. Disposing the stream tears down the circuit.
     /// </summary>
-    public async Task<Stream> ConnectToOnionAsync(string onion, int port, CancellationToken ct = default)
-    {
-        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before connecting.");
-        if (!OnionAddress.TryParse(onion, out OnionAddress address))
-            throw new ArgumentException($"Not a valid v3 .onion address: {onion}", nameof(onion));
+    public Task<Stream> ConnectToOnionAsync(string onion, int port, CancellationToken ct = default) =>
+        ConnectToOnionAsync(onion, port, _options.Timeout, ct);
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(_options.Timeout);
+    /// <summary>
+    /// As <see cref="ConnectToOnionAsync(string,int,CancellationToken)"/>, but with an explicit per-call
+    /// <paramref name="timeout"/> that overrides <see cref="TorClientOptions.Timeout"/> — convenient for a racing
+    /// dialer that abandons slow dials. Throws <see cref="InvalidOnionAddressException"/> on a malformed address.
+    /// </summary>
+    public async Task<Stream> ConnectToOnionAsync(string onion, int port, TimeSpan timeout, CancellationToken ct = default)
+    {
+        // Validate the (possibly untrusted) address first, so a malformed one is rejected regardless of client state.
+        if (!OnionAddress.TryParse(onion, out OnionAddress address))
+            throw new InvalidOnionAddressException(onion);
+        TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before connecting.");
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
 
         Report(TorPhase.BuildingCircuit, $"Connecting to onion service {onion}…", 0.3);
         var connector = new OnionConnector(network);
-        Stream stream = await connector.ConnectAsync(address, port, timeout.Token).ConfigureAwait(false);
+        Stream stream = await connector.ConnectAsync(address, port, cts.Token).ConfigureAwait(false);
         Report(TorPhase.Connected, $"Connected to {onion}.", 1.0);
         return stream;
     }
@@ -210,12 +242,22 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// (see <see cref="ConnectViaExitAsync"/>). The SOCKS5 server and the HttpClient integration both dial through
     /// here, so both reach onion and clearnet destinations alike.
     /// </summary>
-    public async Task<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
+    public Task<Stream> ConnectAsync(string host, int port, CancellationToken cancellationToken = default) =>
+        ConnectAsync(host, port, _options.Timeout, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="ConnectAsync(string,int,CancellationToken)"/>, with an explicit per-call <paramref name="timeout"/>.
+    /// If <see cref="TorClientOptions.OnionOnly"/> is set, a non-onion host throws <see cref="ClearnetBlockedException"/>
+    /// rather than routing through a Tor exit.
+    /// </summary>
+    public async Task<Stream> ConnectAsync(string host, int port, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(host);
-        return host.EndsWith(".onion", StringComparison.OrdinalIgnoreCase)
-            ? await ConnectToOnionAsync(host, port, cancellationToken).ConfigureAwait(false)
-            : await ConnectViaExitAsync(host, port, cancellationToken).ConfigureAwait(false);
+        if (host.EndsWith(".onion", StringComparison.OrdinalIgnoreCase))
+            return await ConnectToOnionAsync(host, port, timeout, cancellationToken).ConfigureAwait(false);
+        if (_options.OnionOnly)
+            throw new ClearnetBlockedException(host);
+        return await ConnectViaExitAsync(host, port, timeout, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -224,27 +266,33 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// target — the exit performs the DNS resolution, so no local lookup leaks. Retries on a fresh exit if one
     /// refuses the address (exit policy / resolve failure). Disposing the stream tears the circuit down.
     /// </summary>
-    public async Task<Stream> ConnectViaExitAsync(string host, int port, CancellationToken ct = default)
+    public Task<Stream> ConnectViaExitAsync(string host, int port, CancellationToken ct = default) =>
+        ConnectViaExitAsync(host, port, _options.Timeout, ct);
+
+    /// <summary>As <see cref="ConnectViaExitAsync(string,int,CancellationToken)"/>, with an explicit per-attempt
+    /// <paramref name="timeout"/>. Throws <see cref="ClearnetBlockedException"/> if the client is <c>OnionOnly</c>.</summary>
+    public async Task<Stream> ConnectViaExitAsync(string host, int port, TimeSpan timeout, CancellationToken ct = default)
     {
+        if (_options.OnionOnly) throw new ClearnetBlockedException(host);
         TorNetwork network = _network ?? throw new InvalidOperationException("Call StartAsync before connecting.");
         const int maxAttempts = 3;
         Exception? last = null;
 
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(_options.Timeout);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(timeout);
 
             Report(TorPhase.BuildingCircuit, $"Building an exit circuit to {host}:{port}…", 0.3);
             OrConnection conn;
             Circuit circuit;
-            try { (conn, circuit) = await network.BuildExitCircuitAsync(port, middleCount: 1, DateTimeOffset.UtcNow, timeout.Token).ConfigureAwait(false); }
+            try { (conn, circuit) = await network.BuildExitCircuitAsync(port, middleCount: 1, DateTimeOffset.UtcNow, cts.Token).ConfigureAwait(false); }
             catch (Exception e) when (e is not OperationCanceledException) { last = e; continue; }
 
             try
             {
                 Report(TorPhase.Connecting, $"Opening a stream to {host}:{port} via the exit…", 0.7);
-                TorStream stream = await circuit.ConnectAsync($"{host}:{port}", RelayBeginFlags.IPv6Okay, timeout.Token).ConfigureAwait(false);
+                TorStream stream = await circuit.ConnectAsync($"{host}:{port}", RelayBeginFlags.IPv6Okay, cts.Token).ConfigureAwait(false);
                 Report(TorPhase.Connected, $"Connected to {host}:{port}.", 1.0);
                 return new CircuitOwningStream(stream, circuit, conn);
             }

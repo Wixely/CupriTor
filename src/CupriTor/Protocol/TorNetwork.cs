@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using CupriTor.Directory;
@@ -22,6 +23,11 @@ internal sealed class TorNetwork
     private uint _circIdCounter;
     private volatile Consensus _consensus;
 
+    // Microdescriptors are content-addressed by their SHA-256 digest, so a cached entry can never be stale:
+    // a changed descriptor yields a new digest (a cache miss). This both stops re-fetching a relay's ntor key
+    // over the (clearnet) directory channel on every circuit build and speeds up high-fan-out dialing.
+    private readonly ConcurrentDictionary<string, Microdescriptor> _microdescCache = new(StringComparer.Ordinal);
+
     /// <summary>The current verified consensus. Swapped atomically by <see cref="UpdateConsensus"/> on refresh.</summary>
     public Consensus Consensus => _consensus;
     public EntryGuardManager Guards { get; }
@@ -41,7 +47,18 @@ internal sealed class TorNetwork
     }
 
     /// <summary>Atomically replace the consensus (after a fresh fetch + verification). New circuits/rings use it immediately.</summary>
-    public void UpdateConsensus(Consensus consensus) => _consensus = consensus;
+    public void UpdateConsensus(Consensus consensus)
+    {
+        _consensus = consensus;
+
+        // Prune cached microdescriptors no longer referenced by the new consensus, keeping the cache bounded to
+        // roughly the network size. Content-addressed, so dropping a still-live entry only costs a re-fetch.
+        var live = new HashSet<string>(StringComparer.Ordinal);
+        foreach (RouterStatusEntry r in consensus.Routers)
+            if (r.MicrodescriptorSha256 is not null) live.Add(Convert.ToHexString(r.MicrodescriptorSha256));
+        foreach (string key in _microdescCache.Keys)
+            if (!live.Contains(key)) _microdescCache.TryRemove(key, out _);
+    }
 
     /// <summary>
     /// Build a circuit of <paramref name="length"/> hops (entry guard + middles), establish the OR
@@ -223,23 +240,26 @@ internal sealed class TorNetwork
         RelayHopInfo hop0 = HopFor(path[0]);
 
         // A failure to reach or handshake the guard is the guard's fault; a failure at a later hop is not.
-        OrConnection conn;
+        OrConnection? established = null;
         Circuit circuit;
         try
         {
-            conn = await OrConnection.EstablishAsync(
+            established = await OrConnection.EstablishAsync(
                 _transport, path[0].Address.ToString(), path[0].OrPort, now,
                 expectedEd25519Identity: hop0.Ed25519Identity, peerAddress: path[0].Address, ct: ct).ConfigureAwait(false);
-            circuit = conn.CreateCircuit(NextCircuitId());
+            circuit = established.CreateCircuit(NextCircuitId());
             await circuit.CreateFirstHopAsync(hop0, ct).ConfigureAwait(false);
         }
         catch
         {
             Guards.MarkFailure(guard, now);
+            // Don't leak the guard connection if it came up but the first hop was cancelled/failed mid-handshake.
+            if (established is not null) await established.DisposeAsync().ConfigureAwait(false);
             throw;
         }
 
         // The guard connection is up; the guard is good regardless of what happens at later hops.
+        OrConnection conn = established!; // non-null past the catch above (which rethrows on any failure)
         Guards.MarkSuccess(guard, now);
         try
         {
@@ -258,38 +278,10 @@ internal sealed class TorNetwork
         }
     }
 
-    /// <summary>Fetch and digest-match the microdescriptors for the given routers (ntor keys + ed25519 ids).</summary>
-    private async Task<Dictionary<string, Microdescriptor>> ResolveMicrodescriptorsAsync(IReadOnlyList<RouterStatusEntry> routers, CancellationToken ct)
-    {
-        var byDigest = new Dictionary<string, RouterStatusEntry>(StringComparer.Ordinal);
-        var digests = new List<string>();
-        foreach (RouterStatusEntry r in routers)
-        {
-            if (r.MicrodescriptorSha256 is null)
-                throw new InvalidOperationException($"Router {r.Nickname} has no microdescriptor digest.");
-            byDigest[Convert.ToHexString(r.MicrodescriptorSha256)] = r;
-            digests.Add(Convert.ToBase64String(r.MicrodescriptorSha256).TrimEnd('='));
-        }
-
-        string text = await _dir.FetchMicrodescriptorsAsync(digests, ct).ConfigureAwait(false);
-
-        var result = new Dictionary<string, Microdescriptor>(StringComparer.Ordinal);
-        foreach (string block in SplitMicrodescriptorBlocks(text))
-        {
-            byte[] digest = SHA256.HashData(Encoding.ASCII.GetBytes(block));
-            if (byDigest.TryGetValue(Convert.ToHexString(digest), out RouterStatusEntry? router) &&
-                Microdescriptor.TryParse(block, out Microdescriptor md) && md.NtorOnionKey.Length == 32)
-            {
-                result[Convert.ToHexString(router.RsaIdentityDigest)] = md;
-            }
-        }
-
-        foreach (RouterStatusEntry r in routers)
-            if (!result.ContainsKey(Convert.ToHexString(r.RsaIdentityDigest)))
-                throw new InvalidOperationException($"Could not resolve a microdescriptor (ntor key) for {r.Nickname}.");
-
-        return result;
-    }
+    /// <summary>Resolve the microdescriptors (ntor keys + ed25519 ids) for the given routers, serving cache hits and
+    /// fetching only the misses. Every router must resolve (throws otherwise).</summary>
+    private Task<Dictionary<string, Microdescriptor>> ResolveMicrodescriptorsAsync(IReadOnlyList<RouterStatusEntry> routers, CancellationToken ct) =>
+        FetchMicrodescriptorsCachedAsync(routers, lenient: false, ct);
 
     /// <summary>
     /// Resolve the ed25519 identities of the currently-listed HSDir relays (needed to compute the hash
@@ -318,35 +310,63 @@ internal sealed class TorNetwork
     }
 
     /// <summary>Batch-fetch microdescriptors, digest-matched, tolerating relays whose descriptor is unavailable.</summary>
-    private async Task<Dictionary<string, Microdescriptor>> FetchMicrodescriptorsLenientAsync(IReadOnlyList<RouterStatusEntry> routers, CancellationToken ct)
+    private Task<Dictionary<string, Microdescriptor>> FetchMicrodescriptorsLenientAsync(IReadOnlyList<RouterStatusEntry> routers, CancellationToken ct) =>
+        FetchMicrodescriptorsCachedAsync(routers, lenient: true, ct);
+
+    /// <summary>
+    /// Resolve microdescriptors for <paramref name="routers"/>, serving from the content-addressed cache and
+    /// fetching only cache misses (batched) over the directory source; fetched descriptors are then cached by
+    /// digest. When <paramref name="lenient"/> is true, relays without a digest or whose descriptor can't be
+    /// fetched/parsed are omitted; otherwise every router must resolve (throws if any does not).
+    /// </summary>
+    private async Task<Dictionary<string, Microdescriptor>> FetchMicrodescriptorsCachedAsync(IReadOnlyList<RouterStatusEntry> routers, bool lenient, CancellationToken ct)
     {
-        var byDigest = new Dictionary<string, RouterStatusEntry>(StringComparer.Ordinal);
+        var result = new Dictionary<string, Microdescriptor>(StringComparer.Ordinal); // hex(rsa id) → md
+        var need = new List<RouterStatusEntry>();
+        var byMdDigest = new Dictionary<string, RouterStatusEntry>(StringComparer.Ordinal); // hex(md digest) → router (misses)
+
         foreach (RouterStatusEntry r in routers)
-            if (r.MicrodescriptorSha256 is not null)
-                byDigest[Convert.ToHexString(r.MicrodescriptorSha256)] = r;
-
-        var result = new Dictionary<string, Microdescriptor>(StringComparer.Ordinal);
-        const int batchSize = 90;
-        for (int start = 0; start < routers.Count; start += batchSize)
         {
-            var slice = routers.Skip(start).Take(batchSize).Where(r => r.MicrodescriptorSha256 is not null).ToList();
-            if (slice.Count == 0) continue;
+            if (r.MicrodescriptorSha256 is null)
+            {
+                if (lenient) continue;
+                throw new InvalidOperationException($"Router {r.Nickname} has no microdescriptor digest.");
+            }
+            string mdHex = Convert.ToHexString(r.MicrodescriptorSha256);
+            if (_microdescCache.TryGetValue(mdHex, out Microdescriptor? cached))
+                result[Convert.ToHexString(r.RsaIdentityDigest)] = cached;
+            else { need.Add(r); byMdDigest[mdHex] = r; }
+        }
 
+        const int batchSize = 90;
+        for (int start = 0; start < need.Count; start += batchSize)
+        {
+            var slice = need.Skip(start).Take(batchSize).ToList();
             var digests = slice.Select(r => Convert.ToBase64String(r.MicrodescriptorSha256!).TrimEnd('=')).ToList();
+
             string text;
             try { text = await _dir.FetchMicrodescriptorsAsync(digests, ct).ConfigureAwait(false); }
-            catch (Exception e) when (e is not OperationCanceledException) { continue; }
+            catch (Exception e) when (lenient && e is not OperationCanceledException) { continue; }
 
             foreach (string block in SplitMicrodescriptorBlocks(text))
             {
                 byte[] digest = SHA256.HashData(Encoding.ASCII.GetBytes(block));
-                if (byDigest.TryGetValue(Convert.ToHexString(digest), out RouterStatusEntry? router) &&
-                    Microdescriptor.TryParse(block, out Microdescriptor md))
+                string mdHex = Convert.ToHexString(digest);
+                if (byMdDigest.TryGetValue(mdHex, out RouterStatusEntry? router) &&
+                    Microdescriptor.TryParse(block, out Microdescriptor md) &&
+                    (lenient || md.NtorOnionKey.Length == 32))
                 {
+                    _microdescCache[mdHex] = md; // content-addressed → safe to cache (pruned on consensus update)
                     result[Convert.ToHexString(router.RsaIdentityDigest)] = md;
                 }
             }
         }
+
+        if (!lenient)
+            foreach (RouterStatusEntry r in routers)
+                if (!result.ContainsKey(Convert.ToHexString(r.RsaIdentityDigest)))
+                    throw new InvalidOperationException($"Could not resolve a microdescriptor (ntor key) for {r.Nickname}.");
+
         return result;
     }
 

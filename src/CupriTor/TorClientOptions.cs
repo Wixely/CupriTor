@@ -38,4 +38,21 @@ public sealed class TorClientOptions
     /// long-running client or onion service — the consensus is only valid for a few hours. Defaults to true.
     /// </summary>
     public bool AutoRefreshConsensus { get; set; } = true;
+
+    /// <summary>
+    /// When true, only <c>.onion</c> destinations may be dialed; any clearnet/exit dial — a non-onion host, or a
+    /// malformed address that isn't recognised as onion — throws <see cref="ClearnetBlockedException"/> instead of
+    /// routing through a Tor exit. Set this for an onion-only transport so a bad address can never silently leave Tor
+    /// via an exit + remote DNS. Applies to <see cref="TorClient.ConnectAsync"/>/<c>ConnectViaExitAsync</c>, and thus
+    /// to the SOCKS5 server and HttpClient integration that dial through them. Default false.
+    /// </summary>
+    public bool OnionOnly { get; set; }
+
+    /// <summary>
+    /// When true, <see cref="TorClient.StartAsync"/> refuses to start with the in-memory default
+    /// <see cref="StateStore"/>, which loses entry guards on restart (an anonymity risk). Set this in a long-running
+    /// node so ephemeral guards can't ship by accident, and pair it with a persistent store (e.g. <c>FileStateStore</c>).
+    /// Default false — a one-time warning is emitted via <see cref="TorClient.StatusChanged"/> instead.
+    /// </summary>
+    public bool RequirePersistentState { get; set; }
 }

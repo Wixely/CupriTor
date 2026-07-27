@@ -12,7 +12,7 @@
 
   <!-- Package metadata (applied when a project opts into packing; see src/Directory.Build.props). -->
   <PropertyGroup>
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
     <Authors>Wixely</Authors>
     <Company>Wixely</Company>
     <Product>CupriTor</Product>

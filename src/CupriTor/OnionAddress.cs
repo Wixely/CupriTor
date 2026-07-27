@@ -6,6 +6,17 @@ using Org.BouncyCastle.Crypto.Digests;
 namespace CupriTor;
 
 /// <summary>
+/// Thrown when a string is not a valid v3 <c>.onion</c> address (bad length, version, checksum, or key). Derives
+/// from <see cref="ArgumentException"/> so existing <c>catch (ArgumentException)</c> handlers still catch it.
+/// </summary>
+public sealed class InvalidOnionAddressException(string onion)
+    : ArgumentException($"Not a valid v3 .onion address: {onion}", "onion")
+{
+    /// <summary>The offending input string.</summary>
+    public string Onion { get; } = onion;
+}
+
+/// <summary>
 /// A Tor v3 onion service address. The wire form is
 /// <c>base32(PUBKEY ‖ CHECKSUM ‖ VERSION) + ".onion"</c> where PUBKEY is a 32-byte Ed25519 public
 /// key, VERSION is 0x03, and CHECKSUM is the first two bytes of

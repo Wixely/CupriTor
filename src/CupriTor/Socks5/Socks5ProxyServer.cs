@@ -112,6 +112,12 @@ public sealed class Socks5ProxyServer : IAsyncDisposable
                         await ReplyAsync(stream, Socks5Reply.NetworkUnreachable, ct).ConfigureAwait(false);
                         return;
                     }
+                    catch (ClearnetBlockedException)
+                    {
+                        _trace?.Invoke($"onion-only: refused clearnet {host}:{port}");
+                        await ReplyAsync(stream, Socks5Reply.ConnectionNotAllowed, ct).ConfigureAwait(false);
+                        return;
+                    }
                     catch (Exception e)
                     {
                         _trace?.Invoke($"dial {host}:{port} failed: {e.Message}");
@@ -220,6 +226,7 @@ public sealed class Socks5ProxyServer : IAsyncDisposable
     {
         Succeeded = 0x00,
         GeneralFailure = 0x01,
+        ConnectionNotAllowed = 0x02,
         NetworkUnreachable = 0x03,
         HostUnreachable = 0x04,
         CommandNotSupported = 0x07,

@@ -104,17 +104,18 @@ internal sealed class OnionConnector
                 int status = ack.Data.Length >= 2 ? BinaryPrimitives.ReadUInt16BigEndian(ack.Data.Span) : -1;
                 _trace?.Invoke($"INTRODUCE_ACK status {status}");
 
-                await introCircuit.DisposeAsync().ConfigureAwait(false);
-                await introConn.DisposeAsync().ConfigureAwait(false);
-                introCircuit = null;
-                introConn = null;
-
                 if (status == 0) return hs; // ACK success — the service is now contacting our rendezvous point
                 last = new InvalidOperationException($"INTRODUCE_ACK returned status {status}.");
             }
             catch (Exception e) when (e is not OperationCanceledException)
             {
                 last = e;
+            }
+            finally
+            {
+                // Always tear down the intro circuit + connection — including on cancellation. An intro circuit is
+                // never handed to the caller (only the rendezvous circuit is), so it's disposed here whether we
+                // ACKed, failed, or were cancelled mid-INTRODUCE1.
                 if (introCircuit is not null) await introCircuit.DisposeAsync().ConfigureAwait(false);
                 if (introConn is not null) await introConn.DisposeAsync().ConfigureAwait(false);
             }

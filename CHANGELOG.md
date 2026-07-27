@@ -2,6 +2,31 @@
 
 All notable changes to CupriTor are recorded here. This project adheres to [Semantic Versioning](https://semver.org).
 
+## 0.1.2
+
+Hardening and DX for onion-only, high-fan-out transports. No breaking changes (all new members are additive).
+
+### Anonymity / correctness
+- **Microdescriptor cache** — per-hop microdescriptors are cached by content digest and pruned on consensus
+  refresh, so building a circuit no longer re-fetches (over the clearnet directory channel) the descriptors of
+  relays already seen. Reduces the repeated on-path leak of relay selection and cuts per-dial latency.
+- **Cancellation cleanup** — fixed two paths that could leak an `OrConnection` until GC when a dial was cancelled
+  mid-handshake (the guard first hop in `BuildOverPathAsync`, and INTRODUCE1 in the onion connector); partially
+  built circuits are now always disposed, including on cancellation.
+
+### Safety / API
+- **`TorClientOptions.OnionOnly`** — when set, any clearnet/exit dial (including a malformed address) throws
+  `ClearnetBlockedException` instead of routing through a Tor exit, so an onion-only transport can't silently
+  leave Tor. Covers `ConnectAsync`, the SOCKS5 server (replies "connection not allowed by ruleset"), and the
+  HttpClient integration, since all dial through the same seam.
+- **`FileStateStore`** — a durable, atomically-written (`temp` + rename) `IStateStore` so entry guards persist
+  across restarts. The in-memory default now emits a one-time `StatusChanged` warning; set
+  `TorClientOptions.RequirePersistentState` to refuse to start without a persistent store.
+- **`InvalidOnionAddressException`** (derives from `ArgumentException`) is now thrown for malformed onion
+  addresses by `ConnectToOnionAsync`/`LookupOnionAsync`.
+- **Per-call timeouts** — `ConnectToOnionAsync`/`ConnectAsync`/`ConnectViaExitAsync` gained overloads taking an
+  explicit `TimeSpan` timeout (overriding `TorClientOptions.Timeout`), convenient for a racing dialer.
+
 ## 0.1.1
 
 Licensing and packaging only — no code or API changes; the library is identical to 0.1.0.
