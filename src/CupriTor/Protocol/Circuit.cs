@@ -78,7 +78,7 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         byte[] create2 = new Create2Payload(HandshakeType.Ntor, handshake).Encode();
         await _codec.WriteAsync(_link, new Cell(_circId, CellCommand.Create2, create2), ct).ConfigureAwait(false);
 
-        Cell reply = await _codec.ReadAsync(_link, ct).ConfigureAwait(false);
+        Cell reply = await ReadCellSkippingPaddingAsync(ct).ConfigureAwait(false);
         if (reply.Command == CellCommand.Destroy)
             throw new CircuitException($"DESTROY at CREATE2 (reason {ReasonByte(reply.Payload)}).");
         if (reply.Command != CellCommand.Created2 || !Created2Payload.TryParse(reply.Payload.Span, out var created2))
@@ -311,10 +311,24 @@ internal sealed class Circuit : IRelayStreamController, IAsyncDisposable
         finally { _writeLock.Release(); }
     }
 
+    /// <summary>
+    /// Read the next cell on the link, dropping PADDING/VPADDING keepalive cells (tor-spec: padding cells are
+    /// ignored). Used by the build-time CREATE2/EXTEND2 reads so an interspersed keepalive — which a relay with
+    /// connection padding can send at any time — can't derail a circuit build. (The receive loop already skips them.)
+    /// </summary>
+    private async Task<Cell> ReadCellSkippingPaddingAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            Cell cell = await _codec.ReadAsync(_link, ct).ConfigureAwait(false);
+            if (cell.Command is not (CellCommand.Padding or CellCommand.VPadding)) return cell;
+        }
+    }
+
     /// <summary>Read a single relay cell inline (used during building, before the receive loop runs).</summary>
     private async Task<RelayCell> ReceiveRelayCellDirectAsync(int expectedHop, CancellationToken ct)
     {
-        Cell cell = await _codec.ReadAsync(_link, ct).ConfigureAwait(false);
+        Cell cell = await ReadCellSkippingPaddingAsync(ct).ConfigureAwait(false);
         if (cell.Command == CellCommand.Destroy)
             throw new CircuitException($"DESTROY (reason {ReasonByte(cell.Payload)}).");
         if (cell.Command is not (CellCommand.Relay or CellCommand.RelayEarly))

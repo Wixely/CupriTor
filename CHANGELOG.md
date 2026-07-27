@@ -20,6 +20,12 @@ over the clearnet directory channel). No breaking changes.
   microdescriptors), which reveals that a Tor client is bootstrapping but not its path selection. Build-time
   microdescriptor resolution stays cache-first (clearnet only as a rare fallback for a brand-new relay).
 
+### Correctness
+- **PADDING keepalives no longer break circuit builds.** Build-time CREATE2/EXTEND2 reads now drop PADDING/VPADDING
+  cells (matching the receive loop and tor-spec) instead of failing — a relay with connection padding can send a
+  keepalive mid-handshake, which previously aborted the build. Surfaced live by the long over-circuit consensus
+  transfer; hardens every circuit build (onion + exit included).
+
 ## 0.1.2
 
 Hardening and DX for onion-only, high-fan-out transports. No breaking changes (all new members are additive).
