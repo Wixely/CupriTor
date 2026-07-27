@@ -4,7 +4,19 @@ All notable changes to CupriTor are recorded here. This project adheres to [Sema
 
 ## 0.1.6
 
-Throttling for high-fan-out consumers. No breaking changes (additive; default behaviour unchanged).
+Client-side private-onion support and throttling for high-fan-out consumers. No breaking changes (additive;
+default behaviour unchanged).
+
+### Onion client
+- **Connect to private (client-authorized) onions.** `ConnectToOnionAsync(onion, port, OnionClientAuth, …)` decrypts
+  a private service's descriptor with the client's x25519 authorization key — recovering the descriptor cookie
+  (rend-spec-v3 §2.5.1.3) to decrypt the inner layer — so an authorized client can reach a private onion, the mirror
+  of hosting one with `authorizedClients`. Build the key from a tor `descriptor:x25519:` line via
+  `OnionClientAuth.FromTorPrivateKey`, or from raw bytes via `FromX25519PrivateKey`. A missing or unauthorized key
+  throws `OnionClientAuthorizationRequiredException` (its `NoKeySupplied` tells the two apart). Previously only
+  *hosting* private onions was implemented — the client decrypted the inner layer without the cookie, so connecting
+  to a private onion always failed. The descriptor-decrypt crypto is round-tripped offline against the service
+  builder; the end-to-end connect to a live private onion is still owed live validation.
 
 ### Reliability / DX
 - **Optional concurrent-dial cap.** `TorClientOptions.MaxConcurrentDials` (default 0 = unlimited) bounds how many
@@ -121,8 +133,9 @@ TLS transport). 175 tests.
 - `TorClient` — bootstraps and **verifies** the microdescriptor consensus against the 9 hard-coded directory
   authorities (strict 5-of-9 majority) before trusting it; maintains entry guards; auto-refreshes the consensus.
   `new TorClient()` works with no configuration (built-in directory authorities).
-- **Onion client** — `ConnectToOnionAsync` (descriptor lookup → rendezvous → introduce → `Stream`), including
-  connecting to **private** (client-authorized) onions.
+- **Onion client** — `ConnectToOnionAsync` (descriptor lookup → rendezvous → introduce → `Stream`) for public
+  onions. (Connecting to **private**/client-authorized onions landed later, in 0.1.6; 0.1.0 shipped only the
+  service-side hosting of private onions below.)
 - **Exit / clearnet** — `ConnectViaExitAsync` / `ConnectAsync` route non-onion hosts through exit relays
   (exit-policy aware, remote DNS at the exit).
 - **`HttpClient` integration** — `ITorDialer.CreateTorHttpClient()` / `CreateTorHttpHandler()`.

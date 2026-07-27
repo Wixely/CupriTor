@@ -309,7 +309,26 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
     /// <paramref name="timeout"/> that overrides <see cref="TorClientOptions.Timeout"/> — convenient for a racing
     /// dialer that abandons slow dials. Throws <see cref="InvalidOnionAddressException"/> on a malformed address.
     /// </summary>
-    public async Task<Stream> ConnectToOnionAsync(string onion, int port, TimeSpan timeout, CancellationToken ct = default)
+    public Task<Stream> ConnectToOnionAsync(string onion, int port, TimeSpan timeout, CancellationToken ct = default) =>
+        ConnectToOnionCoreAsync(onion, port, default, timeout, ct);
+
+    /// <summary>
+    /// Connect to a <b>private</b> (client-authorized) v3 onion service using <paramref name="clientAuth"/> — the
+    /// x25519 authorization key whose public half the operator added to its authorized clients. Only an authorized
+    /// client can decrypt the descriptor and connect; a missing or unauthorized key throws
+    /// <see cref="OnionClientAuthorizationRequiredException"/>. (For a public onion, use the overloads without a key.)
+    /// </summary>
+    public Task<Stream> ConnectToOnionAsync(string onion, int port, OnionClientAuth clientAuth, CancellationToken ct = default) =>
+        ConnectToOnionAsync(onion, port, clientAuth, _options.Timeout, ct);
+
+    /// <summary>As <see cref="ConnectToOnionAsync(string,int,OnionClientAuth,CancellationToken)"/>, with an explicit per-call <paramref name="timeout"/>.</summary>
+    public Task<Stream> ConnectToOnionAsync(string onion, int port, OnionClientAuth clientAuth, TimeSpan timeout, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(clientAuth);
+        return ConnectToOnionCoreAsync(onion, port, clientAuth.PrivateKey, timeout, ct);
+    }
+
+    private async Task<Stream> ConnectToOnionCoreAsync(string onion, int port, ReadOnlyMemory<byte> clientAuthKey, TimeSpan timeout, CancellationToken ct)
     {
         // Validate the (possibly untrusted) address first, so a malformed one is rejected regardless of client state.
         if (!OnionAddress.TryParse(onion, out OnionAddress address))
@@ -323,7 +342,7 @@ public sealed class TorClient : IAsyncDisposable, ITorDialer
         using IDisposable slot = await _dialGate.AcquireAsync(cts.Token).ConfigureAwait(false);
         Report(TorPhase.BuildingCircuit, $"Connecting to onion service {onion}…", 0.3);
         var connector = new OnionConnector(network, useVanguards: VanguardsForClient);
-        Stream stream = await connector.ConnectAsync(address, port, cts.Token).ConfigureAwait(false);
+        Stream stream = await connector.ConnectAsync(address, port, clientAuthKey, cts.Token).ConfigureAwait(false);
         Report(TorPhase.Connected, $"Connected to {onion}.", 1.0);
         return stream;
     }

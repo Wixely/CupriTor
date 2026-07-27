@@ -1,6 +1,9 @@
 using System.Text;
 using CupriTor.Directory;
 using CupriTor.Protocol;
+using Org.BouncyCastle.Crypto.Agreement;
+using Org.BouncyCastle.Crypto.Digests;
+using Org.BouncyCastle.Crypto.Parameters;
 
 namespace CupriTor.OnionService;
 
@@ -33,7 +36,18 @@ internal sealed class HsDescriptorClient
         _useVanguards = useVanguards;
     }
 
-    public async Task<OnionDescriptorResult> FetchAsync(OnionAddress address, CancellationToken ct)
+    /// <summary>Fetch and decrypt a PUBLIC onion's descriptor (no client authorization).</summary>
+    public Task<OnionDescriptorResult> FetchAsync(OnionAddress address, CancellationToken ct) =>
+        FetchAsync(address, default, ct);
+
+    /// <summary>
+    /// Fetch and decrypt an onion-service descriptor. For a private (client-authorized) service, pass the client's
+    /// 32-byte x25519 authorization private key in <paramref name="clientAuthKey"/> so the inner layer's descriptor
+    /// cookie can be recovered; pass an empty value for a public service. Throws
+    /// <see cref="OnionClientAuthorizationRequiredException"/> if the service is private and the supplied key is
+    /// missing or not authorized.
+    /// </summary>
+    public async Task<OnionDescriptorResult> FetchAsync(OnionAddress address, ReadOnlyMemory<byte> clientAuthKey, CancellationToken ct)
     {
         byte[] identity = address.PublicKey.ToArray();
         int len = HsTimePeriod.DefaultLengthMinutes;
@@ -71,10 +85,12 @@ internal sealed class HsDescriptorClient
             try
             {
                 _trace?.Invoke($"[{attempt}/{responsible.Count}] HSDir {hsdir.Nickname} {hsdir.Address}:{hsdir.OrPort} — building circuit + fetching");
-                OnionDescriptorResult? result = await TryFetchFromAsync(hsdir, blinded, subcredential, ct).ConfigureAwait(false);
+                OnionDescriptorResult? result = await TryFetchFromAsync(hsdir, blinded, subcredential, clientAuthKey, ct).ConfigureAwait(false);
                 if (result is not null) { _trace?.Invoke($"[{attempt}] descriptor OK ({result.IntroductionPoints.Count} intro points)"); return result; }
             }
-            catch (Exception e) when (e is not OperationCanceledException)
+            // An authorization failure is the same at every HSDir (they serve the same descriptor), so let it
+            // propagate immediately rather than fruitlessly retrying the rest of the ring.
+            catch (Exception e) when (e is not OperationCanceledException and not OnionClientAuthorizationRequiredException)
             {
                 last = e;
                 _trace?.Invoke($"[{attempt}] error: {e.GetType().Name}: {e.Message}");
@@ -83,7 +99,7 @@ internal sealed class HsDescriptorClient
         throw new InvalidOperationException("No responsible HSDir served a valid descriptor.", last);
     }
 
-    private async Task<OnionDescriptorResult?> TryFetchFromAsync(RouterStatusEntry hsdir, byte[] blinded, byte[] subcredential, CancellationToken ct)
+    private async Task<OnionDescriptorResult?> TryFetchFromAsync(RouterStatusEntry hsdir, byte[] blinded, byte[] subcredential, ReadOnlyMemory<byte> clientAuthKey, CancellationToken ct)
     {
         (OrConnection conn, Circuit circuit) = await _network.BuildCircuitToAsync(hsdir, middleCount: 1, DateTimeOffset.UtcNow, ct, vanguards: _useVanguards).ConfigureAwait(false);
         await using (conn)
@@ -104,17 +120,91 @@ internal sealed class HsDescriptorClient
             if (!HsDescriptor.TryParse(descriptorText, out HsDescriptorView view)) { _trace?.Invoke("  descriptor parse FAILED"); return null; }
             if (!view.TryVerify(blinded, out byte[] signingKey)) { _trace?.Invoke("  signature verify FAILED"); return null; }
 
-            byte[] secretInput = HsLayerCrypto.SecretInput(blinded, subcredential, view.RevisionCounter);
-            if (!HsLayerCrypto.TryDecrypt(view.SuperencryptedBlob.Span, secretInput, HsLayerCrypto.SuperencryptedConstant, out byte[] superPlain))
-            { _trace?.Invoke("  superencrypted-layer decrypt FAILED"); return null; }
-            if (!HsSuperencryptedLayer.TryExtractInner(superPlain, out byte[] innerBlob) ||
-                !HsLayerCrypto.TryDecrypt(innerBlob, secretInput, HsLayerCrypto.EncryptedConstant, out byte[] innerPlain))
-            { _trace?.Invoke("  inner-layer decrypt FAILED"); return null; }
-            if (!HsInnerLayer.TryParse(innerPlain, out List<IntroductionPoint> intros))
-            { _trace?.Invoke("  intro-point parse FAILED"); return null; }
+            // Decrypt both layers to intro points (recovering the client-auth cookie for a private onion). An
+            // authorization failure throws (propagated); a corrupt/mismatched descriptor returns null (try next HSDir).
+            List<IntroductionPoint>? intros = DecryptIntroPoints(view, blinded, subcredential, clientAuthKey.Span, _trace);
+            if (intros is null) return null;
 
             return new OnionDescriptorResult(blinded, subcredential, view.RevisionCounter, signingKey, intros);
         }
+    }
+
+    /// <summary>
+    /// Decrypt a verified descriptor's superencrypted + encrypted layers down to its introduction points. The outer
+    /// layer never uses the descriptor cookie; the inner layer does only for a private (client-authorized) service.
+    /// We first try the inner layer without a cookie (public service); if that fails the service is private, so we
+    /// recover the descriptor cookie from the client's x25519 auth key (rend-spec-v3 §2.5.1.3) and retry. Returns
+    /// null for a corrupt/mismatched descriptor; throws <see cref="OnionClientAuthorizationRequiredException"/> when
+    /// the service is private and <paramref name="clientAuthKey"/> is missing or not authorized. Pure (no I/O), so
+    /// the client-auth crypto round-trips offline against <c>HsDescriptorBuilder</c>.
+    /// </summary>
+    internal static List<IntroductionPoint>? DecryptIntroPoints(
+        HsDescriptorView view, byte[] blinded, byte[] subcredential, ReadOnlySpan<byte> clientAuthKey, Action<string>? trace = null)
+    {
+        byte[] outerSecret = HsLayerCrypto.SecretInput(blinded, subcredential, view.RevisionCounter);
+        if (!HsLayerCrypto.TryDecrypt(view.SuperencryptedBlob.Span, outerSecret, HsLayerCrypto.SuperencryptedConstant, out byte[] superPlain))
+        { trace?.Invoke("  superencrypted-layer decrypt FAILED"); return null; }
+        if (!HsSuperencryptedLayer.TryExtractInner(superPlain, out byte[] innerBlob))
+        { trace?.Invoke("  inner-layer extract FAILED"); return null; }
+
+        byte[] innerPlain;
+        if (HsLayerCrypto.TryDecrypt(innerBlob, outerSecret, HsLayerCrypto.EncryptedConstant, out byte[] publicInner))
+        {
+            innerPlain = publicInner; // public service: inner layer decrypts with the same cookie-less secret input
+        }
+        else
+        {
+            // Private service: recover the descriptor cookie from the client's auth key and decrypt with it.
+            byte[]? cookie = clientAuthKey.IsEmpty ? null : RecoverCookie(superPlain, clientAuthKey, subcredential);
+            if (cookie is null)
+                throw new OnionClientAuthorizationRequiredException(noKeySupplied: clientAuthKey.IsEmpty);
+            byte[] innerSecret = HsLayerCrypto.SecretInput(blinded, subcredential, view.RevisionCounter, cookie);
+            if (!HsLayerCrypto.TryDecrypt(innerBlob, innerSecret, HsLayerCrypto.EncryptedConstant, out innerPlain))
+                throw new OnionClientAuthorizationRequiredException(noKeySupplied: false); // cookie recovered but decrypt failed → not authorized
+        }
+
+        if (!HsInnerLayer.TryParse(innerPlain, out List<IntroductionPoint> intros))
+        { trace?.Invoke("  intro-point parse FAILED"); return null; }
+        return intros;
+    }
+
+    // Recover the 16-byte descriptor cookie from the decrypted superencrypted layer using the client's x25519 private
+    // key (rend-spec-v3 §2.5.1.3): x25519(client, ephemeral) → SHAKE-256(subcredential ‖ seed) → CLIENT-ID(8) +
+    // COOKIE-KEY(32); find the auth-client entry matching CLIENT-ID and AES-256-CTR-decrypt its cookie. Mirrors the
+    // service's HsDescriptorBuilder.AuthClientEntry. Null when this key matches no entry (not an authorized client).
+    private static byte[]? RecoverCookie(ReadOnlySpan<byte> outerPlain, ReadOnlySpan<byte> clientPrivate, byte[] subcredential)
+    {
+        byte[]? ephemeralPub = null;
+        var entries = new List<(byte[] Id, byte[] Iv, byte[] Enc)>();
+        foreach (DirectoryItem item in DirectoryReader.Parse(Encoding.ASCII.GetString(outerPlain)))
+        {
+            if (item.Keyword == "desc-auth-ephemeral-key") ephemeralPub = DirectoryReader.Base64(item.Arguments[0]);
+            else if (item.Keyword == "auth-client" && item.Arguments.Length >= 3)
+                entries.Add((DirectoryReader.Base64(item.Arguments[0]), DirectoryReader.Base64(item.Arguments[1]), DirectoryReader.Base64(item.Arguments[2])));
+        }
+        if (ephemeralPub is not { Length: 32 }) return null;
+
+        var agreement = new X25519Agreement();
+        agreement.Init(new X25519PrivateKeyParameters(clientPrivate.ToArray(), 0));
+        var seed = new byte[agreement.AgreementSize];
+        agreement.CalculateAgreement(new X25519PublicKeyParameters(ephemeralPub, 0), seed, 0);
+
+        var shake = new ShakeDigest(256);
+        shake.BlockUpdate(subcredential, 0, subcredential.Length);
+        shake.BlockUpdate(seed, 0, seed.Length);
+        var keys = new byte[40];
+        shake.OutputFinal(keys, 0, keys.Length);
+        byte[] clientId = keys[..8];
+        byte[] cookieKey = keys[8..40];
+
+        foreach ((byte[] id, byte[] iv, byte[] enc) in entries)
+            if (id.AsSpan().SequenceEqual(clientId))
+            {
+                byte[] cookie = (byte[])enc.Clone();
+                new AesCtrKeystream(cookieKey, iv).XorInPlace(cookie);
+                return cookie;
+            }
+        return null;
     }
 
     /// <summary>Open a BEGIN_DIR stream on the circuit and fetch <paramref name="path"/> over HTTP/1.0.</summary>

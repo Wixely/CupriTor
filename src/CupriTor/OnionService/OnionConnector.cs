@@ -26,11 +26,18 @@ internal sealed class OnionConnector
         _useVanguards = useVanguards;
     }
 
-    public async Task<Stream> ConnectAsync(OnionAddress onion, int port, CancellationToken ct)
+    public Task<Stream> ConnectAsync(OnionAddress onion, int port, CancellationToken ct) =>
+        ConnectAsync(onion, port, default, ct);
+
+    /// <summary>
+    /// As <see cref="ConnectAsync(OnionAddress,int,CancellationToken)"/>, but with a client authorization key for a
+    /// private (client-authorized) service. Pass an empty <paramref name="clientAuthKey"/> for a public service.
+    /// </summary>
+    public async Task<Stream> ConnectAsync(OnionAddress onion, int port, ReadOnlyMemory<byte> clientAuthKey, CancellationToken ct)
     {
-        // 1. Fetch + decrypt the descriptor → introduction points.
+        // 1. Fetch + decrypt the descriptor → introduction points (recovering the client-auth cookie if private).
         var descriptorClient = new HsDescriptorClient(_network, _trace, _useVanguards);
-        OnionDescriptorResult descriptor = await descriptorClient.FetchAsync(onion, ct).ConfigureAwait(false);
+        OnionDescriptorResult descriptor = await descriptorClient.FetchAsync(onion, clientAuthKey, ct).ConfigureAwait(false);
         if (descriptor.IntroductionPoints.Count == 0)
             throw new InvalidOperationException("The onion descriptor carries no introduction points.");
         _trace?.Invoke($"descriptor decrypted: {descriptor.IntroductionPoints.Count} intro points");

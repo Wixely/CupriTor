@@ -69,8 +69,10 @@ proxy). Family-distinctness doc corrected to not over-promise.
 ## Capabilities
 
 - 💤 **Relay/node** — see requested #2 (opt-in only).
-- 💤 **Client connect to PRIVATE onions** — authorized-client auth on the connect path. Cookie-recovery logic
-  already exists in a test; not wired into `ConnectToOnionAsync`.
+- ✅ **Client connect to PRIVATE onions** — `ConnectToOnionAsync(onion, port, OnionClientAuth, …)` recovers the
+  descriptor cookie from the client's x25519 auth key and decrypts the inner layer (0.1.6). Round-tripped offline
+  against the service builder (`HsDescriptorClient.DecryptIntroPoints`); end-to-end connect to a live private onion
+  is owed under "Live validation".
 - 🔜 **Full IPv6 reach (priority — flagged by an integrating consumer).** Effectively IPv4-only today: the client
   connects to relays via the primary IPv4 OR address and bootstraps from IPv4 authority literals, so it **won't
   bootstrap or build circuits on an IPv6-only network** (increasingly common on mobile carriers / some cloud). Needs:
@@ -109,6 +111,7 @@ proxy). Family-distinctness doc corrected to not over-promise.
 - 💤 Durable/private **onion soak across a 12:00-UTC boundary** (two-period + morning-window fix).
 - 💤 **In-process ASP.NET Core transport** end-to-end.
 - 💤 **Native `HttpClient` + SOCKS5** against a real onion.
+- 💤 **Connect to a live PRIVATE onion** (0.1.6 client-auth descriptor-cookie path; crypto round-trips offline).
 - ✅ **Exit path** — done, first try.
 
 ## Ops / packaging

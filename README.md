@@ -16,7 +16,8 @@ string page = await http.GetStringAsync("http://duckduckgogg42xjoc72x3sjasowoarf
 ## What it does
 
 - **Connect to onion services** — `tor.ConnectToOnionAsync("addr.onion", port)` → a `Stream`; or a real `HttpClient`
-  via `tor.CreateTorHttpClient()`. Supports **client authorization** (private onions).
+  via `tor.CreateTorHttpClient()`. Reach **private** (client-authorized) onions by passing an `OnionClientAuth`:
+  `tor.ConnectToOnionAsync(addr, port, OnionClientAuth.FromTorPrivateKey(line))`.
 - **Reach the clearnet through Tor** — `tor.ConnectAsync("example.com", 443)` routes through an **exit relay**
   (exit-policy aware, remote DNS at the exit — no local leak).
 - **Host v3 onion services** — `tor.PublishOnionAsync(identity, "127.0.0.1", 8080)` reverse-proxies a local app to a

@@ -239,4 +239,124 @@ public class HsDescriptorTests
         HsBlinding.TryBlindPublicKey(svc.IdentityPublic, svc.Tp, PeriodLen, clientBlinded);
         Assert.False(view.TryVerify(clientBlinded, out _));
     }
+
+    // ---- Client-side connect to PRIVATE onions: the PRODUCTION decrypt path (HsDescriptorClient.DecryptIntroPoints),
+    //      round-tripped offline against the service-side HsDescriptorBuilder. ----
+
+    private static List<PublishIntroPoint> SampleIntroPoints(int seed, int count = 2)
+    {
+        var rng = new Random(seed);
+        byte[] Rand(int n) { var a = new byte[n]; rng.NextBytes(a); return a; }
+        var ips = new List<PublishIntroPoint>();
+        for (int i = 0; i < count; i++)
+        {
+            byte[] specs = LinkSpecifier.EncodeList(new List<LinkSpecifier>
+            {
+                LinkSpecifier.FromIPv4(IPAddress.Parse($"10.5.0.{i + 1}"), (ushort)(9100 + i)),
+                LinkSpecifier.FromLegacyId(Rand(20)),
+                LinkSpecifier.FromEd25519Id(Rand(32)),
+            });
+            var authKey = Ed25519ExpandedKey.FromSeed(Rand(32));
+            var authPub = new byte[32];
+            authKey.GetPublicKey(authPub);
+            ips.Add(new PublishIntroPoint(specs, Rand(32), authPub, Rand(32)));
+        }
+        return ips;
+    }
+
+    private static (byte[] Blinded, byte[] Subcred) ClientView(Service svc)
+    {
+        var blinded = new byte[32];
+        HsBlinding.TryBlindPublicKey(svc.IdentityPublic, svc.Tp, PeriodLen, blinded);
+        return (blinded, HsBlinding.Subcredential(svc.IdentityPublic, blinded));
+    }
+
+    [Fact]
+    public void Production_Decrypt_Recovers_IntroPoints_For_An_Authorized_Client()
+    {
+        Service svc = MakeService(0x70);
+        byte[] subcred = HsBlinding.Subcredential(svc.IdentityPublic, svc.BlindedPublic);
+
+        var clientPriv = new X25519PrivateKeyParameters(new SecureRandom());
+        byte[] clientPub = clientPriv.GeneratePublicKey().GetEncoded();
+        byte[] clientPrivRaw = clientPriv.GetEncoded();
+
+        List<PublishIntroPoint> ips = SampleIntroPoints(21, 2);
+        string descriptor = HsDescriptorBuilder.Build(svc.BlindedKey, svc.BlindedPublic, subcred, Revision, 180, Now.AddHours(3), ips, new[] { clientPub });
+
+        Assert.True(HsDescriptor.TryParse(descriptor, out HsDescriptorView view));
+        (byte[] blinded, byte[] clientSubcred) = ClientView(svc);
+        Assert.True(view.TryVerify(blinded, out _));
+
+        List<IntroductionPoint>? intros = HsDescriptorClient.DecryptIntroPoints(view, blinded, clientSubcred, clientPrivRaw);
+        Assert.NotNull(intros);
+        Assert.Equal(2, intros!.Count);
+        Assert.Equal(ips[0].AuthKeyPublic, intros[0].AuthKey);
+        Assert.Equal(ips[1].AuthKeyPublic, intros[1].AuthKey);
+    }
+
+    [Fact]
+    public void Production_Decrypt_Throws_For_An_Unauthorized_Key()
+    {
+        Service svc = MakeService(0x71);
+        byte[] subcred = HsBlinding.Subcredential(svc.IdentityPublic, svc.BlindedPublic);
+
+        byte[] authorizedPub = new X25519PrivateKeyParameters(new SecureRandom()).GeneratePublicKey().GetEncoded();
+        byte[] strangerPrivRaw = new X25519PrivateKeyParameters(new SecureRandom()).GetEncoded();
+
+        string descriptor = HsDescriptorBuilder.Build(svc.BlindedKey, svc.BlindedPublic, subcred, Revision, 180, Now.AddHours(3), SampleIntroPoints(22), new[] { authorizedPub });
+        Assert.True(HsDescriptor.TryParse(descriptor, out HsDescriptorView view));
+        (byte[] blinded, byte[] clientSubcred) = ClientView(svc);
+
+        var ex = Assert.Throws<OnionClientAuthorizationRequiredException>(() =>
+            HsDescriptorClient.DecryptIntroPoints(view, blinded, clientSubcred, strangerPrivRaw));
+        Assert.False(ex.NoKeySupplied); // a key was supplied, it just wasn't authorized
+    }
+
+    [Fact]
+    public void Production_Decrypt_Throws_When_A_Private_Onion_Gets_No_Key()
+    {
+        Service svc = MakeService(0x72);
+        byte[] subcred = HsBlinding.Subcredential(svc.IdentityPublic, svc.BlindedPublic);
+        byte[] authorizedPub = new X25519PrivateKeyParameters(new SecureRandom()).GeneratePublicKey().GetEncoded();
+
+        string descriptor = HsDescriptorBuilder.Build(svc.BlindedKey, svc.BlindedPublic, subcred, Revision, 180, Now.AddHours(3), SampleIntroPoints(23), new[] { authorizedPub });
+        Assert.True(HsDescriptor.TryParse(descriptor, out HsDescriptorView view));
+        (byte[] blinded, byte[] clientSubcred) = ClientView(svc);
+
+        var ex = Assert.Throws<OnionClientAuthorizationRequiredException>(() =>
+            HsDescriptorClient.DecryptIntroPoints(view, blinded, clientSubcred, ReadOnlySpan<byte>.Empty));
+        Assert.True(ex.NoKeySupplied); // private onion, no key at all
+    }
+
+    [Fact]
+    public void Production_Decrypt_Handles_A_Public_Onion_Without_A_Key()
+    {
+        Service svc = MakeService(0x73);
+        byte[] subcred = HsBlinding.Subcredential(svc.IdentityPublic, svc.BlindedPublic);
+
+        // Public descriptor (no authorized clients) still decrypts with no key — the private path doesn't regress it.
+        string descriptor = HsDescriptorBuilder.Build(svc.BlindedKey, svc.BlindedPublic, subcred, Revision, 180, Now.AddHours(3), SampleIntroPoints(24, 3));
+        Assert.True(HsDescriptor.TryParse(descriptor, out HsDescriptorView view));
+        (byte[] blinded, byte[] clientSubcred) = ClientView(svc);
+
+        List<IntroductionPoint>? intros = HsDescriptorClient.DecryptIntroPoints(view, blinded, clientSubcred, ReadOnlySpan<byte>.Empty);
+        Assert.NotNull(intros);
+        Assert.Equal(3, intros!.Count);
+    }
+
+    [Fact]
+    public void OnionClientAuth_Parses_A_Tor_Private_Line_To_The_Raw_Key()
+    {
+        (string _, string privateLine, byte[] _, byte[] privateKey) = OnionClientAuthorization.GenerateClientKeyPair();
+        Assert.StartsWith("descriptor:x25519:", privateLine);
+        Assert.Equal(32, privateKey.Length);
+
+        OnionClientAuth fromLine = OnionClientAuth.FromTorPrivateKey(privateLine);
+        OnionClientAuth fromRaw = OnionClientAuth.FromX25519PrivateKey(privateKey);
+        Assert.Equal(privateKey, fromLine.PrivateKey.ToArray());
+        Assert.Equal(privateKey, fromRaw.PrivateKey.ToArray());
+
+        Assert.Throws<ArgumentException>(() => OnionClientAuth.FromX25519PrivateKey(new byte[31]));
+    }
 }

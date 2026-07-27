@@ -15,12 +15,17 @@ public static class OnionClientAuthorization
     private const string Prefix = "descriptor:x25519:";
 
     /// <summary>Parse an authorized-client public key: a base32 x25519 key, with or without the "descriptor:x25519:" prefix.</summary>
-    public static byte[] ParsePublicKey(string value)
+    public static byte[] ParsePublicKey(string value) => ParseKey(value, "public");
+
+    /// <summary>Parse a client-auth private key: a base32 x25519 key, with or without the "descriptor:x25519:" prefix.</summary>
+    public static byte[] ParsePrivateKey(string value) => ParseKey(value, "private");
+
+    private static byte[] ParseKey(string value, string which)
     {
         string b32 = value.Trim();
         if (b32.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)) b32 = b32[Prefix.Length..];
         if (!Base32.TryDecode(b32, out byte[] key) || key.Length != 32)
-            throw new FormatException("Expected a base32-encoded 32-byte x25519 public key (optionally prefixed with 'descriptor:x25519:').");
+            throw new FormatException($"Expected a base32-encoded 32-byte x25519 {which} key (optionally prefixed with 'descriptor:x25519:').");
         return key;
     }
 
