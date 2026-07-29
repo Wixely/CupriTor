@@ -13,7 +13,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="CupriCurve" Version="0.1.0" />
+    <PackageReference Include="CupriCurve" Version="0.2.0" />
     <ProjectReference Include="..\..\src\CupriTor\CupriTor.csproj" />
   </ItemGroup>
 
