@@ -54,6 +54,7 @@ jobs:
           name: nupkg
           path: artifacts/*.*nupkg
           if-no-files-found: error
+          retention-days: 3
 
   release:
     name: Publish to GitHub Packages
