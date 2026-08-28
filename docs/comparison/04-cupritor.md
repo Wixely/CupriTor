@@ -32,6 +32,59 @@ using HttpClient http = tor.CreateTorHttpClient();
 string page = await http.GetStringAsync("http://…onion/");
 ```
 
+## Strengths
+
+Grouped by the kind of problem they solve. Every one of these is a place CupriTor is ahead of both alternatives.
+
+### Deployment
+
+- **Nothing to ship but your own assembly.** No `tor.exe`, no Privoxy, no `libeay32.dll`, no geoip files. The whole
+  stack is `CupriTor` + BouncyCastle + CupriCurve. Both alternatives are, by construction, a wrapper around a
+  native binary you have to obtain, place, and keep current.
+- **No child process.** Works in environments that forbid or cannot `exec` — hardened containers, restricted
+  hosting, sandboxes, and anywhere process-spawn is an auditable event you'd rather not generate.
+- **AOT- and single-file-friendly** (`IsAotCompatible=true`). A single self-contained binary that speaks Tor is
+  possible here and impossible with the other two.
+- **Every RID .NET supports**, macOS included. TorSharp is Windows+Linux only; Tor.NET is Windows only.
+- **Deterministic, pinned versioning.** Your Tor behaviour is a package version in your lockfile. With TorSharp,
+  behaviour depends on whichever `tor` build the fetcher happened to download at runtime.
+
+### Security and supply chain
+
+- **No executable is downloaded at runtime.** TorSharp's `TorSharpToolFetcher` pulls binaries from the network on
+  first run — convenient, and a supply-chain surface plus a policy problem in regulated environments. CupriTor
+  fetches only Tor *directory* data, over a Tor circuit.
+- **No local proxy port to expose.** TorSharp and Tor.NET both work by opening a SOCKS/HTTP port on loopback.
+  Any other process on that machine can use it, and it's a lateral-movement and misattribution risk. CupriTor's
+  circuits live inside your process; the SOCKS5 server is opt-in, not the mechanism.
+- **No OS crypto on the critical path** — managed BouncyCastle + CupriCurve, so behaviour doesn't shift with the
+  host's crypto policy, FIPS mode, or OpenSSL version.
+- **Vanguards-lite on by default** (layer-2 guard-discovery defense, 4-hop onion circuits, since v0.1.4). With
+  upstream `tor` this needs the separate vanguards addon; neither wrapper surfaces it at all.
+
+### Capability
+
+- **Hosting v3 onion services** — durable addresses, self-healing intro points, two-period descriptor publishing,
+  public or private. Neither alternative can host at all.
+- **In-process ASP.NET Core on an onion** (`UseCupriTorOnion`) — binds clearnet and onion at once, with no loopback
+  reverse-proxy hop in between.
+- **Private, client-authorized onions** as both client (`OnionClientAuth`) and service.
+- **Native onion and exit connections** returning a plain `Stream` — no SOCKS hop, no proxy translation layer.
+- **A sidecar** (`CupriTor.Host`) that fronts *any* local app — IIS, Kestrel, non-.NET — in `ClearnetOnly` /
+  `TorOnly` / `Both` modes.
+
+### API and operations
+
+- **Modern, idiomatic .NET.** `await using`, `CancellationToken` throughout, nullable-enabled, warnings-as-errors.
+  Tor.NET is a 2017 .NET 4.0 API; TorSharp's surface is "here is a port number".
+- **Safe under concurrency.** `MaxConcurrentDials` caps parallel dials on one client. TorSharp's README states it
+  is *not* thread-safe and needs a separate instance — meaning a separate `tor` process and port pair — per
+  parallel task.
+- **Diagnosable failures.** Typed `TorClockSkewException` with tolerance (clock skew is the classic silent
+  bootstrap killer), connectivity events, a re-callable / opt-in-retry bootstrap, and `StatusChanged` progress
+  suitable for driving a real loading bar. The alternatives surface failures as a dead proxy port or a control-port
+  string.
+
 ## Capabilities the other two structurally cannot have
 
 | Capability | Why TorSharp / Tor.NET can't |
@@ -82,3 +135,12 @@ you can happily run a child process — TorSharp does that with a fraction of th
 - **Adoption / battle-testing.** 343 stars and 155k downloads of real-world use is a bug-finding machine CupriTor
   does not yet have.
 - **No relay mode** (also true of the other two, but worth stating: none of these four let you *run* a relay).
+
+## Verdict
+
+The only option of the four that can host an onion service, run without a subprocess, or target macOS — so where
+those are requirements, it is not "the better choice", it is the only one. Where they are not requirements and
+"HTTP through an exit relay" is the whole job, TorSharp does that today with an audited C core, a frictionless
+NuGet install, and years of field use, and it remains the more conservative pick. CupriTor's bet is that owning
+the implementation buys capabilities and a deployment story that wrapping a binary structurally cannot, and that
+bet is worth making with the risks in the section above understood rather than glossed.

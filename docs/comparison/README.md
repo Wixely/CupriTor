@@ -71,6 +71,26 @@ OrNET     │ Not a library at all — iOS/Android consumer apps.            │
   deployment, or Tor inside an environment where you cannot spawn a subprocess** → **CupriTor** is the only one of
   the four that can do it, at the cost of being the newest and least battle-tested.
 
+## Where CupriTor leads
+
+Things CupriTor does that **neither** TorSharp nor Tor.NET can, at any version, because of how they are built:
+
+| | Why the wrappers can't |
+|---|---|
+| **Host a v3 onion service** — durable address, self-healing intro points, two-period publishing, public or private | Both are proxy *consumers*; neither publishes descriptors or runs intro points |
+| **Run with no native binary and no child process** — hardened containers, sandboxes, exec-forbidden hosts | Both *are* a wrapper around a `tor` process |
+| **AOT / single-file deploy** — one self-contained binary that speaks Tor | Shipping and exec'ing `tor` defeats it |
+| **In-process ASP.NET Core on an onion** (`UseCupriTorOnion`), no loopback hop | Requires being the transport, not proxying to a local port |
+| **macOS, and every RID .NET supports** | TorSharp: Windows+Linux. Tor.NET: Windows only |
+| **Private, client-authorized onions**, client and service | Not exposed by either |
+| **Vanguards-lite by default** (layer-2 guard-discovery defense, 4-hop onion circuits) | Needs the separate upstream vanguards addon; neither surfaces it |
+| **No executable downloaded at runtime**, no loopback proxy port other local processes can reach | Their whole mechanism is a fetched binary plus a localhost port |
+| **Safe concurrent use** (`MaxConcurrentDials`) | TorSharp is explicitly not thread-safe — one `tor` process per parallel task |
+| **Diagnosable failures** — typed `TorClockSkewException`, connectivity events, retryable bootstrap, progress events | Failures surface as a dead port or a control-port string |
+
+Full detail in [04-cupritor.md](04-cupritor.md); the complete side-by-side is in
+[05-feature-matrix.md](05-feature-matrix.md).
+
 ## The honest caveat about CupriTor
 
 TorSharp and Tor.NET both delegate the actual anonymity-critical work to the C `tor` implementation, which is
