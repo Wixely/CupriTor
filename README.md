@@ -111,6 +111,7 @@ dotnet run --project samples/TorHttpClient          # fetch over Tor
 ## Links
 
 - [Roadmap](ROADMAP.md) · [Threat model](docs/THREAT-MODEL.md) · [Security policy](SECURITY.md) · [Samples](samples)
+- [How CupriTor compares to other .NET Tor libraries](docs/comparison) — TorSharp, Tor.NET, and where each one fits.
 - [CupriCurve](https://github.com/Wixely/CupriCurve) — the managed Ed25519/Curve25519 library CupriTor builds on.
 
 ## License
